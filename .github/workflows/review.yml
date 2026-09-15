@@ -48,7 +48,7 @@ jobs:
           persist-credentials: false
       - name: Collect trusted policy and reserve review
         id: prepare
-        uses: reed-yang/independent-pr-review@36fd1dc4139ce67233b1de09d5e95d3e060a5e3e # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@d5a3d8eb12be4ee73de934c69ae37077b9cb434e # engine pin; updated by scripts/pin_release.py
         with:
           phase: prepare
           config: ${{ inputs.config }}
@@ -85,7 +85,9 @@ jobs:
     concurrency:
       group: agy-subscription-account
       cancel-in-progress: false
-    timeout-minutes: 25
+    # Two sequential stages can each use Grok's 60-minute inference budget.
+    # Successful calls return immediately; this is a hard ceiling, not a wait.
+    timeout-minutes: 125
     permissions: {}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -93,7 +95,7 @@ jobs:
           name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/independent-review
       - name: Independent opinions and candidate verification
-        uses: reed-yang/independent-pr-review@36fd1dc4139ce67233b1de09d5e95d3e060a5e3e # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@d5a3d8eb12be4ee73de934c69ae37077b9cb434e # engine pin; updated by scripts/pin_release.py
         with:
           phase: review
           output: ${{ runner.temp }}/independent-review
@@ -149,7 +151,7 @@ jobs:
           path: ${{ runner.temp }}/independent-review
         if: needs.review.result == 'success'
       - name: Update summary and verified inline findings
-        uses: reed-yang/independent-pr-review@36fd1dc4139ce67233b1de09d5e95d3e060a5e3e # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@d5a3d8eb12be4ee73de934c69ae37077b9cb434e # engine pin; updated by scripts/pin_release.py
         with:
           phase: ${{ needs.review.result == 'success' && 'publish' || 'fail' }}
           output: ${{ runner.temp }}/independent-review

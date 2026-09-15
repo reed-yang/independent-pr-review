@@ -6,7 +6,7 @@ import json
 import time
 
 from .anchors import bind
-from .evidence import match_evidence
+from .evidence import match_evidence, rejection
 from .core import HARNESSES, ReviewError, digest, run_slot, estimate_tokens, runtime_settings
 
 
@@ -35,8 +35,12 @@ For each candidate return exactly one decision:
 - uncertain: missing context or unresolved ambiguity prevents a conclusion.
 Do not mark a previous issue fixed merely because its text disappeared or another
 reviewer did not mention it. Missing tests or missing callers alone do not prove a bug.
-Use confirmed/fixed/dismissed only with an exact evidence substring from a supplied
-patch, head_text or base_text. For fixed, cite current head/context evidence and
+Use confirmed/fixed/dismissed only with a contiguous exact source quote of 8 to
+4000 characters from the cited file's patch, head_text or base_text. Preserve
+indentation, whitespace, punctuation and identifiers; do not paraphrase, insert
+ellipses or join separate locations. Prefer one short decisive quote and explain
+other supporting observations in reason. If no exact quote is available, choose
+uncertain with empty evidence and evidence_path. For fixed, cite current evidence and
 explain why the original trigger is prevented. Otherwise choose uncertain.
 Return only JSON: {"decisions":[{"finding_id":"candidate id",
 "status":"confirmed|dismissed|fixed|uncertain", "reason":"trigger and evidence analysis",
@@ -45,7 +49,7 @@ Write reasons in English. Never claim tests ran. No extra decisions.
 ''' + json.dumps({'packet': packet, 'candidates': candidates}, ensure_ascii=False)
 
 
-def parse_decisions(raw, packet, candidates):
+def parse_decisions(raw, packet, candidates, allow_partial=False):
     if not isinstance(raw, str):
         raise ReviewError('invalid_verification_json')
     raw = raw.strip()
@@ -60,9 +64,9 @@ def parse_decisions(raw, packet, candidates):
     if not isinstance(decisions, list) or len(decisions) != len(ids):
         raise ReviewError('incomplete_verification')
     files = {entry['path']: entry for entry in packet['files'] + packet['context']}
-    valid = {}
-    for decision in decisions:
-        if not isinstance(decision, dict) or decision.get('finding_id') not in ids or decision['finding_id'] in valid:
+    valid, rejected = {}, []
+    for index, decision in enumerate(decisions):
+        if not isinstance(decision, dict) or not isinstance(decision.get('finding_id'), str) or decision['finding_id'] not in ids or decision['finding_id'] in valid:
             raise ReviewError('invalid_verification_identity')
         status = decision.get('status')
         if status not in ('confirmed', 'dismissed', 'fixed', 'uncertain'):
@@ -74,11 +78,20 @@ def parse_decisions(raw, packet, candidates):
         if status != 'uncertain':
             entry = files.get(path, {})
             if not match_evidence(entry, evidence, allow_base=True, current_only=status == 'fixed'):
-                raise ReviewError('verification_evidence_not_in_packet')
+                if not allow_partial:
+                    raise ReviewError('verification_evidence_not_in_packet')
+                rejected.append({**rejection(index, {'path': path, 'evidence': evidence},
+                                             'verification_evidence_not_in_packet', files),
+                                 'finding_id': decision['finding_id']})
+                valid[decision['finding_id']] = {
+                    'finding_id': decision['finding_id'], 'status': 'uncertain',
+                    'reason': 'Verification evidence did not match the supplied source; the decision was rejected.',
+                    'evidence_path': '', 'evidence': ''}
+                continue
             if status == 'fixed' and not ids[decision['finding_id']].get('previous'):
                 raise ReviewError('new_candidate_cannot_be_fixed')
         valid[decision['finding_id']] = {key: decision.get(key, '') for key in ('finding_id', 'status', 'reason', 'evidence_path', 'evidence')}
-    return valid
+    return {'decisions': valid, 'rejected_decisions': rejected} if allow_partial else valid
 
 
 def fit_packet(packet, backend, candidates=None):
@@ -130,10 +143,12 @@ def verify(slot, config, packet, candidates, runners):
     try:
         packet, coverage = fit_packet(packet, backend, candidates)
         prompt = verification_prompt(packet, candidates)
-        estimate = estimate_tokens(prompt) + 6500
+        estimate = estimate_tokens(prompt) + coverage['output_reserve_tokens']
         raw, model, usage = runners[backend['harness']](backend, prompt)
-        decisions = parse_decisions(raw, packet, candidates)
-        return {'slot': slot['id'], 'status': 'completed', 'model': model, 'decisions': decisions,
+        parsed = parse_decisions(raw, packet, candidates, allow_partial=True)
+        rejected = parsed['rejected_decisions']
+        return {'slot': slot['id'], 'status': 'partial' if rejected else 'completed', 'model': model,
+                **parsed, **({'error': 'verification_evidence_not_in_packet'} if rejected else {}),
                 'usage': usage, 'accounted_tokens': usage_tokens(usage, estimate), 'input_context': coverage,
                 'elapsed_seconds': round(time.monotonic() - start, 2)}
     except ReviewError as exc:
@@ -174,7 +189,8 @@ def run(bundle, runners=None):
                 review['input_context'] = lane_coverage[slot['id']]
                 reviews.append(review)
     reviews.sort(key=lambda value: next(i for i, slot in enumerate(slots) if slot['id'] == value['slot']))
-    accounted = sum(usage_tokens(review.get('usage'), len(json.dumps(lane_packets[review['slot']]).encode()) // 3 + 6500)
+    accounted = sum(usage_tokens(review.get('usage'), lane_coverage[review['slot']]['estimated_prompt_tokens'] +
+                                lane_coverage[review['slot']]['output_reserve_tokens'])
                     for review in reviews if review['slot'] in lane_packets)
     candidates = {}
     for review in reviews:
@@ -240,7 +256,7 @@ def run(bundle, runners=None):
             status = 'uncertain'
         finding = {**item, 'status': status, 'verification': decision}
         findings.append(finding)
-    verification_failed = any(item['status'] == 'failed' for item in verifications) or bool(overflow)
+    verification_failed = any(item['status'] != 'completed' for item in verifications) or bool(overflow)
     if verification_failed:
         for review in reviews:
             if review['status'] == 'completed':

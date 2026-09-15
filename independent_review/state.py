@@ -8,7 +8,7 @@ import json
 import re
 import zlib
 
-from .core import ReviewError, digest, github, estimate_tokens
+from .core import ReviewError, digest, github, estimate_tokens, failure_description
 
 
 MARKER = '<!-- independent-pr-review:v2 -->'
@@ -97,7 +97,7 @@ def reserve(state, bundle, run_id, run_url):
     # A conservative estimate stays charged after an interrupted run. The token
     # cap is an accounting guard, not a provider-side hard quota.
     prompt_estimate = estimate_tokens(json.dumps(bundle['packet'], ensure_ascii=False))
-    estimate = 2 * sum(min(prompt_estimate + 40000, lane['input_budget_tokens']) + 6500
+    estimate = 2 * sum(min(prompt_estimate + 40000, lane['input_budget_tokens']) + lane.get('output_reserve_tokens', 6500)
                        for lane in bundle['config']['runtime'].values())
     if state['tokens'] + estimate > limits['max_tokens_per_pr']:
         raise ReviewError('review_token_budget_exhausted')
@@ -134,6 +134,7 @@ def accept(state, result, run_id):
     value['last_reviews'] = [{**{key: lane.get(key) for key in
                                ('slot', 'status', 'model', 'scope', 'error', 'effort', 'context_window_tokens', 'elapsed_seconds')},
                               'errors': [item['error'] for item in lane.get('attempts', []) if item.get('error')],
+                              'failure_notes': [note for item in lane.get('attempts', []) if (note := failure_description(item))],
                               'rejected_count': len(lane.get('rejected_findings', []))} for lane in result['reviews']]
     value['coverage'] = result['coverage']
     value['omitted_count'] = len(result['omitted'])
@@ -146,6 +147,7 @@ def reuse(state, run_url):
     value['status'] = 'completed'
     value['last_run'] = run_url
     value['reservation'] = None
-    value['last_reviews'] = [{**lane, 'status': 'reused', 'scope': 'identical_successful_snapshot'}
+    value['last_reviews'] = [{**lane, 'status': 'reused', 'scope': 'identical_successful_snapshot',
+                              'errors': [], 'failure_notes': [], 'rejected_count': 0}
                              for lane in value.get('last_reviews', [])]
     return value

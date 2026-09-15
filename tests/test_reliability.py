@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from independent_review import cli, core, context, evidence, service, state, transport
+from independent_review import cli, core, context, delivery, evidence, service, state, transport
 from test_engine import BASE, HEAD, REPO, answer, bundle, candidate, packet, pr, settings
 
 
@@ -75,26 +75,104 @@ class EvidenceTests(unittest.TestCase):
         accepted = state.accept(reserved, result, '1')
         self.assertFalse(accepted['lanes'])
 
+    def test_bad_verification_quote_preserves_valid_sibling_without_clean_cache(self):
+        data = bundle()
+        first = candidate()
+        second = core.parse_findings(answer([{**first, 'evidence': 'def first(value):'}]), data['packet'])['findings'][0]
+        def runner(backend, prompt):
+            if not prompt.startswith('Independently challenge'):
+                findings = [first, second] if backend['opinion_family'] == 'grok' else []
+                return answer(findings), 'model', {'total_tokens': 100}
+            decisions = [
+                {'finding_id': first['finding_id'], 'status': 'confirmed', 'reason': 'Empty input raises.',
+                 'evidence_path': first['path'], 'evidence': first['evidence']},
+                {'finding_id': second['finding_id'], 'status': 'dismissed', 'reason': 'A guard exists.',
+                 'evidence_path': second['path'], 'evidence': 'invented_guard()'}]
+            return json.dumps({'decisions': decisions}), 'model', {'total_tokens': 321}
+        result = service.run(data, {name: runner for name in core.HARNESSES})
+        self.assertEqual(result['status'], 'partial')
+        by_id = {item['finding_id']: item for item in result['findings']}
+        self.assertEqual(by_id[first['finding_id']]['status'], 'open')
+        self.assertEqual(by_id[second['finding_id']]['status'], 'uncertain')
+        verification = result['verifications'][0]
+        self.assertEqual(verification['status'], 'partial')
+        self.assertEqual(verification['accounted_tokens'], 321)
+        self.assertEqual(verification['rejected_decisions'][0]['finding_id'], second['finding_id'])
+        accepted = state.accept(state.reserve(data['state'], data, '1', 'url'), result, '1')
+        self.assertFalse(accepted['lanes'])
+        self.assertIn('Do not interpret this status as a clean review', delivery.summary(accepted, data['config']['limits']))
+        self.assertIn('retained as uncertain', delivery.report(result))
+
+    def test_partial_verification_still_rejects_duplicate_or_malformed_identity(self):
+        first, second = candidate(), {**candidate(), 'finding_id': 'a' * 24}
+        decision = {'finding_id': first['finding_id'], 'status': 'confirmed', 'reason': 'Trigger.',
+                    'evidence_path': first['path'], 'evidence': 'invented_guard()'}
+        for other in (decision, {**decision, 'finding_id': []}):
+            with self.subTest(other=other):
+                with self.assertRaisesRegex(core.ReviewError, 'invalid_verification_identity'):
+                    service.parse_decisions(json.dumps({'decisions': [decision, other]}), packet(),
+                                            [first, second], allow_partial=True)
+
+    def test_rejected_verification_quote_is_redacted_and_never_confirms_a_fix(self):
+        item = {**candidate(), 'previous': True}
+        decision = {'finding_id': item['finding_id'], 'status': 'fixed', 'reason': 'Fixed.',
+                    'evidence_path': item['path'], 'evidence': 'fixture-secret-key ' + 'x' * 5000}
+        with patch.dict(os.environ, {'GROK_API_KEY': 'fixture-secret-key'}):
+            parsed = service.parse_decisions(json.dumps({'decisions': [decision]}), packet(), [item], allow_partial=True)
+        self.assertEqual(parsed['decisions'][item['finding_id']]['status'], 'uncertain')
+        self.assertNotIn('fixture-secret-key', json.dumps(parsed))
+        self.assertLessEqual(len(parsed['rejected_decisions'][0]['evidence_preview']), 1000)
+
+    def test_summary_explains_reasoning_timeout_without_raw_error_or_clean_result(self):
+        data = bundle()
+        def failed(*args):
+            raise core.ReviewError('provider_deadline_exceeded', {
+                'stage': 'read', 'http_status': 200, 'reasoning_events': 30, 'content_events': 0,
+                'untrusted_error_body': 'private provider error text'})
+        result = service.run(data, {'compatible_packet': failed,
+                                   'antigravity_packet': lambda *args: (answer(), 'gemini', {})})
+        accepted = state.accept(state.reserve(data['state'], data, '1', 'url'), result, '1')
+        rendered = delivery.summary(accepted, data['config']['limits'])
+        self.assertIn('no final review text arrived before the configured time limit', rendered)
+        self.assertIn('Reasoning updates were received', rendered)
+        self.assertIn('Do not interpret this status as a clean review', rendered)
+        self.assertNotIn('private provider error text', rendered)
+        self.assertNotIn('Grok', accepted['lanes'])
+
+    def test_cached_success_does_not_display_a_later_failed_attempt_note(self):
+        value = state.initial(REPO, 7)
+        value.update(status='partial', runs=3, tokens=1234, last_reviews=[{
+            'slot': 'Grok', 'status': 'failed', 'errors': ['provider_deadline_exceeded'],
+            'failure_notes': ['The failed force-review attempt timed out.'], 'rejected_count': 1}])
+        reused = state.reuse(value, 'https://github.com/owner/project/actions/runs/2')
+        rendered = delivery.summary(reused, settings()['limits'])
+        self.assertNotIn('timed out', rendered)
+        self.assertNotIn('provider_deadline_exceeded', rendered)
+        self.assertNotIn('rejected candidate', rendered)
+        self.assertEqual((reused['runs'], reused['tokens']), (3, 1234))
+        self.assertEqual(value['last_reviews'][0]['status'], 'failed')
+
 
 class StreamingTests(unittest.TestCase):
-    def invoke(self, chunks=(), status=200, connect_error=None, read_error=None, content_type='text/event-stream', clock=None, api='chat_completions'):
+    def invoke(self, chunks=(), status=200, connect_error=None, read_error=None, content_type='text/event-stream', clock=None, api='chat_completions', backend=None, read_callback=None):
         response = MagicMock()
         response.__enter__.return_value = response
         response.status = status
         response.getheader.return_value = content_type
-        response.read1.side_effect = list(chunks) + [read_error or b'']
+        response.read1.side_effect = read_callback or list(chunks) + [read_error or b'']
         conn = MagicMock()
         conn.getresponse.return_value = response
         if connect_error:
             conn.connect.side_effect = connect_error
         self.connection = conn
+        options = {'timeout_seconds': 600, 'api': api, **(backend or {})}
         with patch.object(transport.http.client, 'HTTPSConnection', return_value=conn):
             if clock:
                 with patch.object(transport.time, 'monotonic', side_effect=clock):
                     return transport.completion('https://gateway.example/v1/chat/completions', 'do-not-log-this-key',
-                                                {'model': 'grok'}, {'timeout_seconds': 600, 'api': api})
+                                                {'model': 'grok'}, options)
             return transport.completion('https://gateway.example/v1/chat/completions', 'do-not-log-this-key',
-                                        {'model': 'grok'}, {'timeout_seconds': 600, 'api': api})
+                                        {'model': 'grok'}, options)
 
     def stream(self, finish='stop'):
         events = [ {'model': 'grok-4.6', 'choices': [{'delta': {'reasoning_content': 'private reasoning'}}]},
@@ -132,6 +210,97 @@ class StreamingTests(unittest.TestCase):
         values = iter([0, 0, 0, 0, 0, 0, 601, 601])
         with self.assertRaisesRegex(core.ReviewError, 'provider_deadline_exceeded'):
             self.invoke([b': ping\n\n'], clock=lambda: next(values, 601))
+
+    def test_keepalives_and_status_events_do_not_renew_model_progress(self):
+        clock = SimpleNamespace(now=0)
+        events = iter([
+            (1, b'data: {"type":"response.reasoning_summary_text.delta","delta":"progress"}\n\n'),
+            (60, b': ping\n\n'),
+            (100, b'data: {"type":"response.in_progress"}\n\n'),
+            (122, b': ping\n\n'),
+        ])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        with self.assertRaisesRegex(core.ReviewError, 'provider_progress_timeout') as caught:
+            self.invoke(api='responses', clock=lambda: clock.now, read_callback=read,
+                        backend={'progress_timeout_seconds': 120})
+        metrics = caught.exception.diagnostics
+        self.assertEqual(metrics['last_progress_seconds'], 1)
+        self.assertEqual(metrics['reasoning_events'], 1)
+        self.assertEqual(metrics['seconds_without_progress'], 121)
+        self.assertEqual(metrics['keepalive_lines'], 1)
+        self.assertNotIn('do-not-log-this-key', json.dumps(metrics))
+
+    def test_reasoning_renews_progress_before_any_final_text(self):
+        clock = SimpleNamespace(now=0)
+        reasoning = b'data: {"choices":[{"delta":{"reasoning_content":"progress"}}]}\n\n'
+        events = iter([(1, reasoning), (110, reasoning), (210, reasoning), (300, self.stream())])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        result = self.invoke(clock=lambda: clock.now, read_callback=read,
+                             backend={'progress_timeout_seconds': 120})
+        self.assertEqual(result[0], '{"summary":"ok"}')
+        self.assertEqual(result[2]['transport']['first_content_seconds'], 300)
+        self.assertEqual(result[2]['transport']['last_progress_seconds'], 300)
+
+    def test_json_fallback_without_stream_progress_uses_existing_time_limits(self):
+        clock = SimpleNamespace(now=0)
+        response = ResponsesTests().response()
+        events = iter([(180, json.dumps(response).encode()), (181, b'')])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        result = self.invoke(api='responses', content_type='application/json',
+                             clock=lambda: clock.now, read_callback=read,
+                             backend={'progress_timeout_seconds': 120})
+        self.assertEqual(result[0], '{}')
+        self.assertNotIn('progress_timeout_seconds', result[2]['transport'])
+
+    def test_silent_reasoning_is_allowed_without_an_explicit_progress_budget(self):
+        clock = SimpleNamespace(now=0)
+        events = iter([(1, b'data: {"choices":[{"delta":{"reasoning_content":"private"}}]}\n\n'),
+                       (100, b': ping\n\n'), (200, b': ping\n\n'), (300, self.stream())])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        result = self.invoke(clock=lambda: clock.now, read_callback=read)
+        self.assertEqual(result[0], '{"summary":"ok"}')
+        self.assertEqual(result[2]['transport']['largest_progress_gap_seconds'], 299)
+        self.assertEqual(result[2]['transport']['keepalive_lines'], 3)
+
+    def test_default_grok_budget_allows_the_observed_long_silent_completion(self):
+        backend = settings()['backends']['backends']['grok-gateway']
+        clock = SimpleNamespace(now=0)
+        reasoning = b'data: {"type":"response.reasoning_summary_text.delta","delta":"private"}\n\n'
+        final = ('data: '+json.dumps(ResponsesTests().response())+'\n\n').encode()
+        events = iter([(10, reasoning)] + [(i, b': ping\n\n') for i in range(100, 801, 100)] + [(843, final)])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        result = self.invoke(api='responses', backend=backend, clock=lambda: clock.now, read_callback=read)
+        self.assertEqual(result[0], '{}')
+        self.assertEqual(result[2]['transport']['largest_progress_gap_seconds'], 833)
+        self.assertNotIn('progress_timeout_seconds', result[2]['transport'])
+
+    def test_incomplete_response_preserves_only_safe_reason_and_usage(self):
+        event = {'type': 'response.incomplete', 'response': {
+            'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'},
+            'output': [{'type': 'reasoning', 'text': 'private internal reasoning'}],
+            'usage': {'input_tokens': 225, 'output_tokens': 106, 'total_tokens': 331,
+                      'output_tokens_details': {'reasoning_tokens': 105, 'private': 'do-not-log-this-key'}},
+            'error': {'message': 'do-not-log-this-key'}}}
+        raw = ('data: '+json.dumps(event)+'\n\n').encode()
+        with self.assertRaisesRegex(core.ReviewError, 'provider_stream_error') as caught:
+            self.invoke([raw], api='responses')
+        metrics = caught.exception.diagnostics
+        self.assertEqual(metrics['incomplete_reason'], 'max_output_tokens')
+        self.assertEqual(metrics['upstream_status'], 'incomplete')
+        self.assertEqual(metrics['provider_usage']['reasoning_tokens'], 105)
+        self.assertEqual(metrics['provider_usage']['output_tokens'], 106)
+        self.assertNotIn('private', json.dumps(metrics))
+        self.assertNotIn('do-not-log-this-key', json.dumps(metrics))
 
     def test_truncated_stream_non_stop_finish_and_tool_calls_fail_closed(self):
         for raw in (self.stream().replace(b'data: [DONE]\r\n\r\n', b''), self.stream('length'),
@@ -228,6 +397,22 @@ class ResponsesTests(unittest.TestCase):
         with self.assertRaises(core.ReviewError):
             transport.ResponsesCompletion().event(json.dumps(obj))
 
+    def test_reasoning_usage_is_reported_without_double_counting_total(self):
+        obj = self.response()
+        obj['response']['usage']['output_tokens_details'] = {'reasoning_tokens': 15}
+        decoder = transport.ResponsesCompletion()
+        decoder.event(json.dumps(obj))
+        usage = decoder.result('requested')[2]
+        self.assertEqual(usage['reasoning_tokens'], 15)
+        self.assertEqual(service.usage_tokens(usage, 999), 30)
+        obj['type'] = 'response.incomplete'
+        obj['response']['status'] = 'incomplete'
+        obj['response']['incomplete_details'] = {'reason': 'do-not-log-this-key'}
+        decoder = transport.ResponsesCompletion()
+        with self.assertRaises(core.ReviewError):
+            decoder.event(json.dumps(obj))
+        self.assertEqual(decoder.terminal['incomplete_reason'], 'other')
+
     def test_explicit_responses_keeps_gateway_key_model_and_effort(self):
         backend = {**settings()['backends']['backends']['grok-gateway'], 'api': 'responses'}
         env = {'GROK_API_KEY': 'fixture', 'GROK_BASE_URL': 'https://gateway.example/v1', 'GROK_MODEL': 'grok-4.6', 'GROK_EFFORT': 'xhigh'}
@@ -239,6 +424,40 @@ class ResponsesTests(unittest.TestCase):
         self.assertEqual(payload['reasoning'], {'effort': 'xhigh'})
         self.assertEqual(payload['model'], 'grok-4.6')
         self.assertNotIn('messages', payload)
+
+
+class ReasoningBudgetTests(unittest.TestCase):
+    def test_reasoning_reserve_fits_the_requested_context_and_precharges_both_stages(self):
+        data = bundle()
+        grok = data['config']['runtime']['Grok']
+        self.assertEqual(grok['context_window_tokens'], 500000)
+        self.assertEqual(grok['output_reserve_tokens'], 128000)
+        self.assertLessEqual(grok['input_budget_tokens'] + grok['output_reserve_tokens'], 500000)
+        reserved = state.reserve(data['state'], data, '1', 'url')
+        legacy = copy.deepcopy(data)
+        legacy['config']['runtime']['Grok']['output_reserve_tokens'] = 6500
+        old = state.reserve(legacy['state'], legacy, '1', 'url')
+        self.assertEqual(reserved['tokens'] - old['tokens'], 2 * (128000 - 6500))
+
+    def test_missing_generation_and_verification_usage_retain_reasoning_reserve(self):
+        data = bundle()
+        def failed(*args):
+            raise core.ReviewError('provider_deadline_exceeded')
+        runners = {'compatible_packet': failed,
+                   'antigravity_packet': lambda *args: (answer(), 'gemini', {'total_tokens': 10})}
+        result = service.run(data, runners)
+        grok = next(lane for lane in result['reviews'] if lane['slot'] == 'Grok')
+        self.assertEqual(result['accounted_tokens'], grok['input_context']['estimated_prompt_tokens'] + 128000 + 10)
+        config = data['config']['backends']
+        checked = service.verify(config['slots'][0], config, data['packet'], [candidate()], runners)
+        self.assertEqual(checked['accounted_tokens'],
+                         core.estimate_tokens(service.verification_prompt(data['packet'], [candidate()])) + 128000)
+
+    def test_invalid_or_context_exhausting_completion_reserve_fails_before_inference(self):
+        for reserve in (True, 0, 6499, 500000):
+            with self.subTest(reserve=reserve), self.assertRaisesRegex(core.ReviewError, 'invalid_output_reserve'):
+                core.runtime_settings({'harness': 'compatible_packet', 'default_context_window_tokens': 500000,
+                                       'output_reserve_tokens': reserve})
 
 
 class CollectionEfficiencyTests(unittest.TestCase):

@@ -19,15 +19,20 @@ The summary is advisory. A provider/verification failure is partial or failed,
 never an empty clean result. Workflow publication fails on incomplete review after
 writing the truthful summary. A cancelled workflow can retain an in-progress
 reservation; the next eligible run remains charged for it. Read its run link.
+Known transport failures include a short English explanation in the PR summary;
+raw provider error text is never used as comment prose. Reusing a successful
+snapshot clears transient failure notes without refunding consumed run budget.
 
 ## Failure recovery
 
 | Symptom | Action |
 | --- | --- |
 | `http_503`, no upstream accounts, quota errors | Fix the selected provider group/account and retry within the budget; no fallback is automatic. |
-| `provider_connect_timeout`, `provider_headers_timeout`, `provider_idle_timeout`, `provider_deadline_exceeded` | Inspect redacted stage, timing, byte and event counters in result.json. Connect defaults to 20s, response idle to 120s and total to 600s. Streaming keepalives do not extend the total deadline. No automatic retry spends another full call. |
+| `provider_connect_timeout`, `provider_headers_timeout`, `provider_idle_timeout`, `provider_deadline_exceeded` | Inspect redacted stage, timing, byte and event counters in result.json. Grok defaults to 20s connect, 120s socket idle and 3600s total for xhigh; Gemini remains at 600s total. Streaming keepalives do not extend the total deadline. No automatic retry spends another full call. |
+| `provider_progress_timeout` | No nonempty reasoning or final-text delta arrived within an explicitly configured `progress_timeout_seconds`. Disabled by default: silent internal reasoning can outlast visible summaries. Keepalive comments and status-only events do not renew this optional budget. Compare `last_byte_seconds`, `last_progress_seconds`, `seconds_without_progress` and `keepalive_lines`. This is an incomplete review, not proof of an upstream crash or a clean result. JSON responses that ignore streaming retain the existing socket/total limits because they expose no incremental progress. |
+| `provider_stream_error` with `incomplete_reason` | The upstream explicitly ended the response as incomplete. Inspect the allowlisted reason and numeric `provider_usage`, including `reasoning_tokens`; partial text is never accepted as a completed review. `max_output_tokens` semantics differ across providers and must not be assumed to bound internal reasoning. |
 | `provider_dns_error`, `provider_tls_error`, `provider_connection_error` | Check the configured gateway/network. Diagnostics never contain raw exceptions, headers, response bodies or credentials. |
-| Rejected candidate evidence | Inspect its redacted, bounded quote preview and reason in result.json. Literal contiguous diff-side quotes are accepted without diff markers. Other invalid candidates are excluded and the lane remains partial; valid siblings still receive verification. |
+| Rejected candidate or verification evidence | Inspect its redacted, bounded quote preview and reason in result.json. Literal contiguous diff-side quotes are accepted without diff markers. Invalid generation candidates are excluded; invalid verification decisions become uncertain. Valid siblings are retained, but the review remains partial and cannot advance a successful baseline. Copy contiguous source quotes exactly, preserving line breaks; use a short decisive quote instead of joining locations. |
 | `agy_authentication_required`, refresh rotation | Log in interactively and resync encrypted OAuth; do not paste tokens in comments. |
 | Missing state/provider Secret in reusable jobs | Preserve explicit caller secret name mappings and the callee declarations; Environment binding alone can yield empty values. |
 | State signature mismatch | Restore the correct state key. Do not silently delete/reset state to bypass budgets. |
@@ -57,6 +62,11 @@ consumer environment, product packages or repository tests are installed. Native
 agy is downloaded and checksum-verified in its own lane while Grok starts; the
 same verified binary serves a subsequent verification call in that job. Native
 OAuth/HOME state is never cached. Three credential-separated jobs are retained.
+The review job has a 125-minute ceiling for generation followed by verification;
+each stage can spend up to 60 minutes waiting for Grok. Successful calls return
+immediately, so this ceiling does not make small reviews wait. Grok reserves
+128,000 completion tokens for reasoning and visible output when usage is missing;
+this is conservative accounting, not a provider-enforced reasoning limit.
 
 Source collection reads immutable tree sizes before downloading optional source
 that cannot fit. On Cortex PR #13 this reduced API reads from 234 to 13 while
@@ -98,8 +108,21 @@ The native Responses replay also reached 600s: HTTP 200 at 3.91s, 30 recognized
 reasoning events (333 characters), and no content events. The request was accepted
 but upstream generation/scheduling did not yield final text within the deadline;
 these counters do not reveal internal thinking throughput or the gateway queue.
-Large-PR Grok completion therefore remains unqualified. Do not treat either timeout
-as a clean review or silently lower effort/coverage to make acceptance pass.
+A later replay of the identical original packet completed through the gateway on
+[hosted run 34954973753](https://github.com/reed-yang/cortex-research/actions/runs/34954973753):
+1413.96s, 45,674 input and 81,849 output tokens, including 81,669 reasoning tokens.
+It reported no qualifying P1/P2 findings and explicit missing-context limitations.
+The native OAuth control completed in 1774.18s with 101,070 reasoning tokens and
+four candidates requiring independent verification. Both used Grok 4.6/xhigh;
+changing authentication did not remove the long reasoning period. The gateway's
+largest public-progress gap was 1403.86s despite keepalives. These completions
+explain why 600s was inadequate and why a short progress watchdog is unsafe;
+they do not guarantee every call completes within the new 3600s ceiling.
+
+The hosted replay spent about five seconds preparing before inference, then three
+seconds finishing the job after inference. No model retry or product environment
+installation ran. The remaining 23.6 minutes were spent inside the provider call.
+This is a large-PR completion sample, not a full-window quality benchmark.
 
 Normal hosted acceptance on Cortex #18 completed with Grok at 28.35s and native
 Gemini at 13.54s, producing one English summary. Prepare/review/publish used

@@ -4,7 +4,7 @@ import json
 import os
 
 from .context import eligible, identity
-from .core import ReviewError, github, plain, request_json
+from .core import ReviewError, github, plain, request_json, failure_description
 from .state import BOT, MARKER, encode
 
 
@@ -52,6 +52,9 @@ def summary(state, limits):
         scope = scopes.get(lane.get('scope'), (lane.get('scope') or 'Pending').replace('_', ' '))
         cells = (name, status, scope)
         lines.append('| ' + ' | '.join(plain(cell).replace('|', '／') for cell in cells) + ' |')
+    for lane in state.get('last_reviews', []):
+        for note in lane.get('failure_notes', []):
+            lines.extend(['', f"**{plain(lane['slot'])}:** {plain(note)}"])
     lines.extend(['', '<details>', '<summary>Scope, budget and controls</summary>', '',
                   'The reviewers received bounded diff and related-source context. Repository code was not executed; no tests were run by this harness.',
                   f"Omitted inputs: {state.get('omitted_count', 0)}. Runs reserved: {state['runs']}/{limits['max_runs_per_pr']}. "
@@ -78,6 +81,8 @@ def report(result):
         for attempt in lane.get('attempts', []):
             if attempt.get('error'):
                 lines.append(f"- Failure: {plain(attempt['error'])}; stage: {plain(attempt.get('stage', 'unknown'))}; elapsed: {attempt.get('elapsed_seconds', 'unknown')} seconds.")
+                if note := failure_description(attempt):
+                    lines.append('- ' + note)
                 if attempt.get('diagnostics'):
                     lines.append('- Transport diagnostics: ' + plain(json.dumps(attempt['diagnostics'], sort_keys=True)))
         for rejected in lane.get('rejected_findings', []):
@@ -92,6 +97,9 @@ def report(result):
             lines.append(f"- Input: estimated {context['estimated_prompt_tokens']:,} tokens; configured window {context['context_window_tokens']:,}; effort {lane.get('effort') or 'default'}.")
             lines.append(f"- Lane-specific omissions: {len(context.get('omitted', [])) if 'omitted' in context else context.get('omitted_count', 0)}. Estimates reserve space for native overhead and output; they are not exact tokenizer counts.")
     lines.extend(['', '## Verification', ''])
+    for verification in result.get('verifications', []):
+        for rejected in verification.get('rejected_decisions', []):
+            lines.append(f"- {plain(verification['slot'])}: rejected decision `{rejected['finding_id']}` ({plain(rejected['error'])}); retained as uncertain. Redacted quote diagnostics are in result.json.")
     for finding in result['findings']:
         lines.append(f"- `{finding['finding_id']}` **{finding['status']}**: {plain(finding['verification']['reason'])}")
     if not result['findings']:

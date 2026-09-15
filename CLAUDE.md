@@ -12,8 +12,12 @@ Actions. Consumer repositories own domain policies, provider settings and Secret
   agy remains the official pinned CLI with consumer OAuth and disposable HOME.
 - transport/evidence: deadline-bounded streaming and literal source validation;
   retain safe failure diagnostics and valid siblings, never cache partial lanes.
+  Streaming progress is measured separately; an optional progress budget excludes keepalives.
 - state: authenticate per-PR state and reserve budget before inference.
+  Completion estimates include reasoning; visible-output caps do not bound it.
 - service: per-lane baselines, candidate verification and normalized outcomes.
+  Reject unsupported verification decisions individually, keep valid siblings,
+  and retain partial status without advancing a successful baseline.
 - delivery: one owned summary and verified inline threads; recheck eligibility,
   immutable identity and reservation before writing. No approval or merge action.
 - cli/action/workflow: separate reservation, inference and publication credentials.
