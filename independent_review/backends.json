@@ -18,6 +18,7 @@
   "backends": {
     "grok-gateway": {
       "harness": "compatible_packet",
+      "api": "responses",
       "opinion_family": "grok",
       "auth_mode": "gateway_api_key",
       "base_url_env": "GROK_BASE_URL",

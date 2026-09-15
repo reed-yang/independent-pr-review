@@ -211,6 +211,15 @@ def run_compatible(backend, prompt):
     model = os.environ.get(backend["model_env"], "")
     if not key or not base or not model:
         raise ReviewError("backend_not_configured")
+    api = backend.get('api', 'chat_completions')
+    if api == 'responses':
+        payload = {'model': model, 'input': [{'role': 'user', 'content': prompt}],
+                   'stream': True, 'max_output_tokens': 6000}
+        if settings['effort']:
+            payload['reasoning'] = {'effort': settings['effort']}
+        return completion(base + '/responses', key, payload, backend)
+    if api != 'chat_completions':
+        raise ReviewError('unsupported_compatible_api')
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}],
                "stream": True, "stream_options": {"include_usage": True},
                backend.get("output_limit_parameter", "max_tokens"): 6000}
@@ -359,5 +368,4 @@ def run_reviews(packet, config, runners=None, dry_run=False):
 def plain(value):
     # Render model content as quoted plain text, without links or mentions.
     return html.escape(str(value)).replace("@", "＠").replace("`", "ˋ").replace("[", "［").replace("]", "］").replace("\n", " ")
-
 

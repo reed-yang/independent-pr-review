@@ -77,7 +77,7 @@ class EvidenceTests(unittest.TestCase):
 
 
 class StreamingTests(unittest.TestCase):
-    def invoke(self, chunks=(), status=200, connect_error=None, read_error=None, content_type='text/event-stream', clock=None):
+    def invoke(self, chunks=(), status=200, connect_error=None, read_error=None, content_type='text/event-stream', clock=None, api='chat_completions'):
         response = MagicMock()
         response.__enter__.return_value = response
         response.status = status
@@ -92,9 +92,9 @@ class StreamingTests(unittest.TestCase):
             if clock:
                 with patch.object(transport.time, 'monotonic', side_effect=clock):
                     return transport.completion('https://gateway.example/v1/chat/completions', 'do-not-log-this-key',
-                                                {'model': 'grok'}, {'timeout_seconds': 600})
+                                                {'model': 'grok'}, {'timeout_seconds': 600, 'api': api})
             return transport.completion('https://gateway.example/v1/chat/completions', 'do-not-log-this-key',
-                                        {'model': 'grok'}, {'timeout_seconds': 600})
+                                        {'model': 'grok'}, {'timeout_seconds': 600, 'api': api})
 
     def stream(self, finish='stop'):
         events = [ {'model': 'grok-4.6', 'choices': [{'delta': {'reasoning_content': 'private reasoning'}}]},
@@ -110,6 +110,8 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(model, 'grok-4.6')
         self.assertEqual(usage['total_tokens'], 42)
         self.assertIn('first_content_seconds', usage['transport'])
+        self.assertEqual(usage['transport']['reasoning_events'], 1)
+        self.assertEqual(usage['transport']['reasoning_chars'], len('private reasoning'))
         self.assertNotIn('private reasoning', json.dumps(usage))
         self.connection.close.assert_called_once()
 
@@ -149,6 +151,15 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(result[0], '{}')
         self.assertEqual(result[2]['transport']['transport'], 'json_response_to_stream_request')
 
+    def test_responses_stream_uses_its_own_terminal_event(self):
+        event = ResponsesTests().response()
+        raw = ('event: response.completed\ndata: ' + json.dumps(event) + '\n\n').encode()
+        result = self.invoke([raw], api='responses')
+        self.assertEqual(result[0], '{}')
+        self.assertEqual(result[2]['transport']['api'], 'responses')
+        with self.assertRaisesRegex(core.ReviewError, 'protocol_mismatch'):
+            self.invoke([raw])
+
     def test_real_tls_stream_with_connection_close(self):
         content = self.stream()
         class Handler(BaseHTTPRequestHandler):
@@ -183,6 +194,51 @@ class StreamingTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 worker.join()
+
+
+class ResponsesTests(unittest.TestCase):
+    def response(self):
+        return {'type': 'response.completed', 'response': {
+            'object': 'response', 'status': 'completed', 'model': 'grok-4.6',
+            'output': [{'type': 'reasoning', 'encrypted_content': 'not-retained'},
+                       {'type': 'message', 'role': 'assistant', 'status': 'completed',
+                        'content': [{'type': 'output_text', 'text': '{}'}]}],
+            'usage': {'input_tokens': 10, 'output_tokens': 20, 'total_tokens': 30}}}
+
+    def test_terminal_response_is_required_and_reasoning_is_not_retained(self):
+        decoder = transport.ResponsesCompletion()
+        decoder.event(json.dumps({'type': 'response.output_text.delta', 'delta': '{}'}))
+        with self.assertRaises(core.ReviewError):
+            decoder.event('[DONE]')
+        decoder.event(json.dumps(self.response()))
+        decoder.event('[DONE]')
+        self.assertEqual(decoder.result('requested'), ('{}', 'grok-4.6', {'input_tokens': 10, 'output_tokens': 20, 'total_tokens': 30}))
+        self.assertNotIn('not-retained', json.dumps(decoder.__dict__))
+
+    def test_failed_mismatched_or_tool_output_cannot_complete(self):
+        for kind in ('response.failed', 'response.incomplete', 'error'):
+            with self.assertRaises(core.ReviewError):
+                transport.ResponsesCompletion().event(json.dumps({'type': kind}))
+        decoder = transport.ResponsesCompletion()
+        decoder.parts = ['different']
+        with self.assertRaisesRegex(core.ReviewError, 'content_mismatch'):
+            decoder.event(json.dumps(self.response()))
+        obj = self.response()
+        obj['response']['output'].append({'type': 'function_call'})
+        with self.assertRaises(core.ReviewError):
+            transport.ResponsesCompletion().event(json.dumps(obj))
+
+    def test_explicit_responses_keeps_gateway_key_model_and_effort(self):
+        backend = {**settings()['backends']['backends']['grok-gateway'], 'api': 'responses'}
+        env = {'GROK_API_KEY': 'fixture', 'GROK_BASE_URL': 'https://gateway.example/v1', 'GROK_MODEL': 'grok-4.6', 'GROK_EFFORT': 'xhigh'}
+        with patch.dict(os.environ, env, clear=True), patch.object(transport, 'completion', return_value=('{}', 'grok-4.6', {})) as request:
+            core.run_compatible(backend, 'source packet')
+        url, key, payload, _ = request.call_args.args
+        self.assertEqual(url, 'https://gateway.example/v1/responses')
+        self.assertEqual(key, 'fixture')
+        self.assertEqual(payload['reasoning'], {'effort': 'xhigh'})
+        self.assertEqual(payload['model'], 'grok-4.6')
+        self.assertNotIn('messages', payload)
 
 
 class CollectionEfficiencyTests(unittest.TestCase):
