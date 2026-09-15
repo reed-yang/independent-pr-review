@@ -77,24 +77,25 @@ class EvidenceTests(unittest.TestCase):
 
 
 class StreamingTests(unittest.TestCase):
-    def invoke(self, chunks=(), status=200, connect_error=None, read_error=None, content_type='text/event-stream', clock=None, api='chat_completions'):
+    def invoke(self, chunks=(), status=200, connect_error=None, read_error=None, content_type='text/event-stream', clock=None, api='chat_completions', backend=None, read_callback=None):
         response = MagicMock()
         response.__enter__.return_value = response
         response.status = status
         response.getheader.return_value = content_type
-        response.read1.side_effect = list(chunks) + [read_error or b'']
+        response.read1.side_effect = read_callback or list(chunks) + [read_error or b'']
         conn = MagicMock()
         conn.getresponse.return_value = response
         if connect_error:
             conn.connect.side_effect = connect_error
         self.connection = conn
+        options = {'timeout_seconds': 600, 'api': api, **(backend or {})}
         with patch.object(transport.http.client, 'HTTPSConnection', return_value=conn):
             if clock:
                 with patch.object(transport.time, 'monotonic', side_effect=clock):
                     return transport.completion('https://gateway.example/v1/chat/completions', 'do-not-log-this-key',
-                                                {'model': 'grok'}, {'timeout_seconds': 600, 'api': api})
+                                                {'model': 'grok'}, options)
             return transport.completion('https://gateway.example/v1/chat/completions', 'do-not-log-this-key',
-                                        {'model': 'grok'}, {'timeout_seconds': 600, 'api': api})
+                                        {'model': 'grok'}, options)
 
     def stream(self, finish='stop'):
         events = [ {'model': 'grok-4.6', 'choices': [{'delta': {'reasoning_content': 'private reasoning'}}]},
@@ -132,6 +133,83 @@ class StreamingTests(unittest.TestCase):
         values = iter([0, 0, 0, 0, 0, 0, 601, 601])
         with self.assertRaisesRegex(core.ReviewError, 'provider_deadline_exceeded'):
             self.invoke([b': ping\n\n'], clock=lambda: next(values, 601))
+
+    def test_keepalives_and_status_events_do_not_renew_model_progress(self):
+        clock = SimpleNamespace(now=0)
+        events = iter([
+            (1, b'data: {"type":"response.reasoning_summary_text.delta","delta":"progress"}\n\n'),
+            (60, b': ping\n\n'),
+            (100, b'data: {"type":"response.in_progress"}\n\n'),
+            (122, b': ping\n\n'),
+        ])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        with self.assertRaisesRegex(core.ReviewError, 'provider_progress_timeout') as caught:
+            self.invoke(api='responses', clock=lambda: clock.now, read_callback=read,
+                        backend={'progress_timeout_seconds': 120})
+        metrics = caught.exception.diagnostics
+        self.assertEqual(metrics['last_progress_seconds'], 1)
+        self.assertEqual(metrics['reasoning_events'], 1)
+        self.assertEqual(metrics['seconds_without_progress'], 121)
+        self.assertEqual(metrics['keepalive_lines'], 1)
+        self.assertNotIn('do-not-log-this-key', json.dumps(metrics))
+
+    def test_reasoning_renews_progress_before_any_final_text(self):
+        clock = SimpleNamespace(now=0)
+        reasoning = b'data: {"choices":[{"delta":{"reasoning_content":"progress"}}]}\n\n'
+        events = iter([(1, reasoning), (110, reasoning), (210, reasoning), (300, self.stream())])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        result = self.invoke(clock=lambda: clock.now, read_callback=read,
+                             backend={'progress_timeout_seconds': 120})
+        self.assertEqual(result[0], '{"summary":"ok"}')
+        self.assertEqual(result[2]['transport']['first_content_seconds'], 300)
+        self.assertEqual(result[2]['transport']['last_progress_seconds'], 300)
+
+    def test_json_fallback_without_stream_progress_uses_existing_time_limits(self):
+        clock = SimpleNamespace(now=0)
+        response = ResponsesTests().response()
+        events = iter([(180, json.dumps(response).encode()), (181, b'')])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        result = self.invoke(api='responses', content_type='application/json',
+                             clock=lambda: clock.now, read_callback=read,
+                             backend={'progress_timeout_seconds': 120})
+        self.assertEqual(result[0], '{}')
+        self.assertNotIn('progress_timeout_seconds', result[2]['transport'])
+
+    def test_silent_reasoning_is_allowed_without_an_explicit_progress_budget(self):
+        clock = SimpleNamespace(now=0)
+        events = iter([(1, b'data: {"choices":[{"delta":{"reasoning_content":"private"}}]}\n\n'),
+                       (100, b': ping\n\n'), (200, b': ping\n\n'), (300, self.stream())])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        result = self.invoke(clock=lambda: clock.now, read_callback=read)
+        self.assertEqual(result[0], '{"summary":"ok"}')
+        self.assertEqual(result[2]['transport']['largest_progress_gap_seconds'], 299)
+        self.assertEqual(result[2]['transport']['keepalive_lines'], 3)
+
+    def test_incomplete_response_preserves_only_safe_reason_and_usage(self):
+        event = {'type': 'response.incomplete', 'response': {
+            'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'},
+            'output': [{'type': 'reasoning', 'text': 'private internal reasoning'}],
+            'usage': {'input_tokens': 225, 'output_tokens': 106, 'total_tokens': 331,
+                      'output_tokens_details': {'reasoning_tokens': 105, 'private': 'do-not-log-this-key'}},
+            'error': {'message': 'do-not-log-this-key'}}}
+        raw = ('data: '+json.dumps(event)+'\n\n').encode()
+        with self.assertRaisesRegex(core.ReviewError, 'provider_stream_error') as caught:
+            self.invoke([raw], api='responses')
+        metrics = caught.exception.diagnostics
+        self.assertEqual(metrics['incomplete_reason'], 'max_output_tokens')
+        self.assertEqual(metrics['upstream_status'], 'incomplete')
+        self.assertEqual(metrics['provider_usage']['reasoning_tokens'], 105)
+        self.assertEqual(metrics['provider_usage']['output_tokens'], 106)
+        self.assertNotIn('private', json.dumps(metrics))
+        self.assertNotIn('do-not-log-this-key', json.dumps(metrics))
 
     def test_truncated_stream_non_stop_finish_and_tool_calls_fail_closed(self):
         for raw in (self.stream().replace(b'data: [DONE]\r\n\r\n', b''), self.stream('length'),
@@ -227,6 +305,22 @@ class ResponsesTests(unittest.TestCase):
         obj['response']['output'].append({'type': 'function_call'})
         with self.assertRaises(core.ReviewError):
             transport.ResponsesCompletion().event(json.dumps(obj))
+
+    def test_reasoning_usage_is_reported_without_double_counting_total(self):
+        obj = self.response()
+        obj['response']['usage']['output_tokens_details'] = {'reasoning_tokens': 15}
+        decoder = transport.ResponsesCompletion()
+        decoder.event(json.dumps(obj))
+        usage = decoder.result('requested')[2]
+        self.assertEqual(usage['reasoning_tokens'], 15)
+        self.assertEqual(service.usage_tokens(usage, 999), 30)
+        obj['type'] = 'response.incomplete'
+        obj['response']['status'] = 'incomplete'
+        obj['response']['incomplete_details'] = {'reason': 'do-not-log-this-key'}
+        decoder = transport.ResponsesCompletion()
+        with self.assertRaises(core.ReviewError):
+            decoder.event(json.dumps(obj))
+        self.assertEqual(decoder.terminal['incomplete_reason'], 'other')
 
     def test_explicit_responses_keeps_gateway_key_model_and_effort(self):
         backend = {**settings()['backends']['backends']['grok-gateway'], 'api': 'responses'}
