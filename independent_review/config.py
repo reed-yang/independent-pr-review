@@ -56,6 +56,9 @@ def load(root, path):
             raise ReviewError('unsupported_harness')
         if not 10 <= backend.get('timeout_seconds', 0) <= 600:
             raise ReviewError('invalid_provider_timeout')
+        for field in ('connect_timeout_seconds', 'idle_timeout_seconds'):
+            if field in backend and (type(backend[field]) is not int or not 1 <= backend[field] <= backend['timeout_seconds']):
+                raise ReviewError('invalid_provider_timeout')
     limits = {**DEFAULTS, **raw.get('limits', {})}
     ceilings = {'packet_chars': 8000000, 'context_chars': 6000000, 'max_context_files': 200,
                 'max_api_reads': 600, 'max_runs_per_pr': 100, 'max_tokens_per_pr': 10000000,

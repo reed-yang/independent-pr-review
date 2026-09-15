@@ -25,6 +25,8 @@
       "model_env": "GROK_MODEL",
       "output_limit_parameter": "max_tokens",
       "timeout_seconds": 600,
+      "connect_timeout_seconds": 20,
+      "idle_timeout_seconds": 120,
       "fallback_on": [
         "network_or_timeout",
         "http_502",

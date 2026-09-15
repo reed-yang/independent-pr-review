@@ -165,7 +165,7 @@ class AuthenticationTests(unittest.TestCase):
     def test_provider_truncation_is_not_clean_review(self):
         backend = configuration()["backends"]["grok-gateway"]
         with patch.dict(os.environ, {"GROK_MODEL": "test", "GROK_BASE_URL": "https://gateway.example/v1", "GROK_API_KEY": "test"}):
-            with patch("independent_review.core.request_json", return_value={"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}):
+            with patch("independent_review.transport.completion", side_effect=review.ReviewError("incomplete_or_unexpected_model_output")):
                 with self.assertRaisesRegex(review.ReviewError, "incomplete"):
                     review.run_compatible(backend, "test")
 
@@ -233,7 +233,10 @@ class GatewayTests(unittest.TestCase):
                 return {"model": "grok-test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(answer())}}]}
             self.assertEqual(key, "gemini-secret")
             return self.response()
-        with patch("independent_review.core.request_json", side_effect=reply):
+        def stream(url, key, payload, backend):
+            response = reply(url, key, payload)
+            return response['choices'][0]['message']['content'], response['model'], {}
+        with patch("independent_review.core.request_json", side_effect=reply), patch("independent_review.transport.completion", side_effect=stream):
             result = review.run_reviews(packet(), self.config)
         self.assertEqual(result["status"], "completed")
         self.assertEqual([r["opinion_family"] for r in result["reviews"]], ["grok", "gemini"])

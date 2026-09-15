@@ -150,11 +150,30 @@ def collect(repo, number, pr, config, state, force_full=False, api=github):
             continue
         packet['files'].append(entry)
     context_used = 0
+    trees = {}
+
+    def source_tree(sha):
+        if sha not in trees:
+            try:
+                trees[sha] = reader.get(f'git/trees/{sha}?recursive=1')
+            except ReviewError:
+                trees[sha] = {'tree': [], 'unavailable': True}
+        return trees[sha]
 
     def add_text(target, key, path, sha):
         nonlocal context_used
+        available = min(limits['context_chars'] - context_used,
+                        limits['packet_chars'] - 4000 - len(json.dumps(packet)))
+        if available <= 2:
+            return False
         try:
-            value = reader.text(path, sha)
+            tree = source_tree(sha)
+            size = next((item.get('size') for item in tree.get('tree', []) if item['path'] == path), None)
+            # JSON with ASCII escaping cannot be smaller than the UTF-8 source.
+            # Tree sizes let us skip downloads that cannot fit the remaining budget.
+            if type(size) is int and size + 2 > available:
+                return False
+            value = reader.text(path, sha, max_chars=min(120000, available - 2))
         except ReviewError:
             value = None
         if value is None:
@@ -182,7 +201,9 @@ def collect(repo, number, pr, config, state, force_full=False, api=github):
             if not add_text(entry, 'base_text', entry.get('previous_filename', entry['path']), merge_base):
                 packet['omitted'].append({'path': entry['path'], 'reason': 'base_text_unavailable_or_budget'})
     try:
-        tree = reader.get(f'git/trees/{head}?recursive=1')
+        tree = source_tree(head)
+        if tree.get('unavailable'):
+            packet['omitted'].append({'path': '<tree>', 'reason': 'tree_unavailable'})
         if tree.get('truncated'):
             packet['omitted'].append({'path': '<tree>', 'reason': 'tree_truncated'})
         candidates = related_candidates(paths, packet['files'], tree.get('tree', []), config['context'])

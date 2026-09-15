@@ -10,6 +10,8 @@ Actions. Consumer repositories own domain policies, provider settings and Secret
   PR code, hooks, package scripts or tools.
 - core/agy_runner: bounded provider calls, English opinions and redacted failures.
   agy remains the official pinned CLI with consumer OAuth and disposable HOME.
+- transport/evidence: deadline-bounded streaming and literal source validation;
+  retain safe failure diagnostics and valid siblings, never cache partial lanes.
 - state: authenticate per-PR state and reserve budget before inference.
 - service: per-lane baselines, candidate verification and normalized outcomes.
 - delivery: one owned summary and verified inline threads; recheck eligibility,

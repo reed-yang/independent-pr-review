@@ -33,7 +33,7 @@ runs:
   using: composite
   steps:
     - name: Install pinned official agy
-      if: inputs.phase == 'review' || inputs.phase == 'auth-check'
+      if: inputs.phase == 'auth-check'
       shell: bash
       env:
         REVIEW_ACTION_PATH: ${{ github.action_path }}
@@ -49,6 +49,7 @@ runs:
         REVIEW_OUTPUT: ${{ inputs.output }}
         REVIEW_MODE: ${{ inputs.mode }}
         AGY_BIN: ${{ runner.temp }}/independent-agy-bin/agy
+        AGY_INSTALL_MISSING: ${{ inputs.phase == 'review' && 'true' || 'false' }}
         AGY_WORK_ROOT: ${{ runner.temp }}/independent-agy-state
       run: |
         if [ "$REVIEW_PHASE" = auth-check ]; then

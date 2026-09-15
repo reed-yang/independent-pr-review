@@ -23,6 +23,11 @@ The harness never approves, requests changes, merges, edits code, or executes PR
 code. A completed run means the bounded review completed, not that the PR is safe
 to merge. Missing context and incomplete provider runs remain visible.
 
+Both models share one runner and run concurrently. Grok uses streaming with bounded
+deadlines; native CLI installation overlaps its request. Literal diff quotes and
+per-candidate rejection keep valid findings without presenting a partial review as
+clean. See [runtime and billing](docs/operations.md#runner-time-and-billing).
+
 ## Connect a repository
 
 1. Copy [examples/auto-review.yml](examples/auto-review.yml) to

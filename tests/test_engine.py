@@ -377,7 +377,11 @@ class ContextWindowTests(unittest.TestCase):
                 return {'choices': [{'finish_reason': 'stop', 'message': {'content': answer()}}]}
             self.assertEqual(payload['generationConfig']['thinkingConfig']['thinkingLevel'], 'MEDIUM')
             return {'candidates': [{'finishReason': 'STOP', 'content': {'parts': [{'text': answer()}]}}]}
-        with patch.dict(os.environ, environment, clear=True), patch.object(core, 'request_json', side_effect=response):
+        def stream(url, token, payload, backend):
+            self.assertTrue(payload['stream'])
+            self.assertTrue(payload['stream_options']['include_usage'])
+            return response(url, token, payload)['choices'][0]['message']['content'], 'grok-4.6', {}
+        with patch.dict(os.environ, environment, clear=True), patch.object(core, 'request_json', side_effect=response), patch('independent_review.transport.completion', side_effect=stream):
             core.run_compatible(backends['grok-gateway'], 'small packet')
             core.run_gemini(backends['gemini-gateway'], 'small packet')
 

@@ -25,6 +25,9 @@ reservation; the next eligible run remains charged for it. Read its run link.
 | Symptom | Action |
 | --- | --- |
 | `http_503`, no upstream accounts, quota errors | Fix the selected provider group/account and retry within the budget; no fallback is automatic. |
+| `provider_connect_timeout`, `provider_headers_timeout`, `provider_idle_timeout`, `provider_deadline_exceeded` | Inspect redacted stage, timing, byte and event counters in result.json. Connect defaults to 20s, response idle to 120s and total to 600s. Streaming keepalives do not extend the total deadline. No automatic retry spends another full call. |
+| `provider_dns_error`, `provider_tls_error`, `provider_connection_error` | Check the configured gateway/network. Diagnostics never contain raw exceptions, headers, response bodies or credentials. |
+| Rejected candidate evidence | Inspect its redacted, bounded quote preview and reason in result.json. Literal contiguous diff-side quotes are accepted without diff markers. Other invalid candidates are excluded and the lane remains partial; valid siblings still receive verification. |
 | `agy_authentication_required`, refresh rotation | Log in interactively and resync encrypted OAuth; do not paste tokens in comments. |
 | Missing state/provider Secret in reusable jobs | Preserve explicit caller secret name mappings and the callee declarations; Environment binding alone can yield empty values. |
 | State signature mismatch | Restore the correct state key. Do not silently delete/reset state to bypass budgets. |
@@ -39,6 +42,29 @@ state migration; this initial version has no automatic rotation/multi-key reader
 Large ledgers fail closed at the comment/state size limit. There is no external
 state database, organization-wide budget service, persistent semantic index,
 automatic incident routing, or automatic account refresh-token propagation.
+
+## Runner time and billing
+
+Standard GitHub-hosted runner compute in public repositories is free; the included
+2,000 minutes on GitHub Free applies to private repository usage. Artifact storage
+has separate limits. See [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+and [per-job rounding](https://docs.github.com/en/billing/reference/actions-runner-pricing).
+For private consumers, optimize summed job time, not just end-to-end wall time.
+
+Both reviewers run concurrently on one Ubuntu runner, and verification batches
+also run concurrently when both families are needed. No Python dependencies,
+consumer environment, product packages or repository tests are installed. Native
+agy is downloaded and checksum-verified in its own lane while Grok starts; the
+same verified binary serves a subsequent verification call in that job. Native
+OAuth/HOME state is never cached. Three credential-separated jobs are retained.
+
+Source collection reads immutable tree sizes before downloading optional source
+that cannot fit. On Cortex PR #13 this reduced API reads from 234 to 13 while
+preserving byte-for-byte equivalent supplied files and context. Identical successful
+snapshots skip source collection and model calls. A failed provider is not called
+again for verification during the same run; affected candidates stay uncertain.
+Failed attempts retain timing, stage and usage where available. Rejected candidates
+never advance the successful baseline or become a clean cached opinion.
 
 ## Releasing
 

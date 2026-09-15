@@ -6,6 +6,7 @@ import json
 import time
 
 from .anchors import bind
+from .evidence import match_evidence
 from .core import HARNESSES, ReviewError, digest, run_slot, estimate_tokens, runtime_settings
 
 
@@ -72,10 +73,7 @@ def parse_decisions(raw, packet, candidates):
             raise ReviewError('invalid_verification_text')
         if status != 'uncertain':
             entry = files.get(path, {})
-            sources = [entry.get(key) or '' for key in ('patch', 'head_text', 'base_text')]
-            if status == 'fixed':
-                sources = [entry.get('head_text') or '']
-            if not 8 <= len(evidence) <= 4000 or not any(evidence in source for source in sources):
+            if not match_evidence(entry, evidence, allow_base=True, current_only=status == 'fixed'):
                 raise ReviewError('verification_evidence_not_in_packet')
             if status == 'fixed' and not ids[decision['finding_id']].get('previous'):
                 raise ReviewError('new_candidate_cannot_be_fixed')
@@ -127,6 +125,7 @@ def verify(slot, config, packet, candidates, runners):
     backend_id = slot['backends'][0]
     backend = config['backends'][backend_id]
     estimate = 0
+    usage = None
     start = time.monotonic()
     try:
         packet, coverage = fit_packet(packet, backend, candidates)
@@ -138,7 +137,9 @@ def verify(slot, config, packet, candidates, runners):
                 'usage': usage, 'accounted_tokens': usage_tokens(usage, estimate), 'input_context': coverage,
                 'elapsed_seconds': round(time.monotonic() - start, 2)}
     except ReviewError as exc:
-        return {'slot': slot['id'], 'status': 'failed', 'error': str(exc), 'decisions': {}, 'accounted_tokens': estimate}
+        return {'slot': slot['id'], 'status': 'failed', 'error': str(exc), 'decisions': {},
+                'accounted_tokens': usage_tokens(usage, estimate), 'usage': usage,
+                'elapsed_seconds': round(time.monotonic() - start, 2), 'diagnostics': exc.diagnostics}
 
 
 def run(bundle, runners=None):
@@ -177,7 +178,7 @@ def run(bundle, runners=None):
                     for review in reviews if review['slot'] in lane_packets)
     candidates = {}
     for review in reviews:
-        if review['status'] != 'completed':
+        if review['status'] not in ('completed', 'partial'):
             continue
         for finding in review['findings']:
             fid = finding['finding_id']
@@ -216,9 +217,18 @@ def run(bundle, runners=None):
         batches[verifier['id']].append(candidate)
     verifications = []
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(verify, slot, config['backends'], packet, batches[slot['id']], runners)
-                   for slot in slots if batches[slot['id']]]
-        verifications = [future.result() for future in futures]
+        futures = []
+        for slot in slots:
+            if not batches[slot['id']]:
+                continue
+            generation = next(review for review in reviews if review['slot'] == slot['id'])
+            if generation['status'] == 'failed' and any(attempt.get('stage') == 'provider' for attempt in generation.get('attempts', [])):
+                verifications.append({'slot': slot['id'], 'status': 'failed',
+                                      'error': 'verification_skipped_after_provider_failure',
+                                      'decisions': {}, 'accounted_tokens': 0, 'elapsed_seconds': 0})
+            else:
+                futures.append(pool.submit(verify, slot, config['backends'], packet, batches[slot['id']], runners))
+        verifications.extend(future.result() for future in futures)
     accounted += sum(item['accounted_tokens'] for item in verifications)
     decisions = {fid: {**decision, 'verifier': result['slot']} for result in verifications for fid, decision in result['decisions'].items()}
     findings = []
