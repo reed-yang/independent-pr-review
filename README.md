@@ -48,8 +48,9 @@ to merge. Missing context and incomplete provider runs remain visible.
    drafts, closed PRs and non-default targets cannot invoke the providers.
 
 Reusable jobs load Secrets directly from the **consumer Environment**. No provider
-credential belongs in this engine repository, and no blanket `secrets: inherit`
-is needed. The caller must grant `contents: read` and `pull-requests: write`; the
+credential belongs in this engine repository. Keep the example's explicit secret
+name mappings: Environment binding alone does not reliably expose Secrets in a
+reusable workflow. No blanket `secrets: inherit` or repository-level copies are needed. The caller must grant `contents: read` and `pull-requests: write`; the
 inference job narrows permissions and does not receive a GitHub token.
 
 [Architecture and trust boundaries](docs/architecture.md) ·

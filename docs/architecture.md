@@ -25,7 +25,11 @@ flowchart LR
 
 GitHub Environment access is a job-level boundary: all three jobs reference the
 consumer's protected Environment, while individual steps explicitly receive only
-the needed Secrets. A maintainer who can alter a trusted default-branch workflow
+the needed Secrets. Both the reusable workflow and caller explicitly list the four
+accepted secret names. Environment binding alone yielded empty Secrets in live
+acceptance, consistent with [runner issue 1490](https://github.com/actions/runner/issues/1490)
+and [issue 4453](https://github.com/actions/runner/issues/4453). Preserve the explicit
+name mapping; values remain in the protected consumer Environment. A maintainer who can alter a trusted default-branch workflow
 can alter this boundary. Use required reviews/CODEOWNERS for `.github/` and rules
 where the project needs stronger governance.
 

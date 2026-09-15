@@ -33,3 +33,10 @@ jobs:
     with:
       pr_number: ${{ inputs.pr_number && format('{0}', inputs.pr_number) || '' }}
       mode: ${{ inputs.mode || 'review' }}
+    # Explicit names enable protected Environment resolution in the called jobs.
+    # Do not broaden this to blanket inheritance or add repository-level copies.
+    secrets:
+      REVIEW_STATE_KEY: ${{ secrets.REVIEW_STATE_KEY }}
+      GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+      AGY_OAUTH_JSON: ${{ secrets.AGY_OAUTH_JSON }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
