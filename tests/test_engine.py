@@ -158,6 +158,29 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(selected, {'src/shared.py': 'import_dependency',
                                     'src/api/handlers.py': 'sibling_module'})
 
+    def test_current_changed_files_take_priority_over_base_versions(self):
+        snapshot = pr()
+        snapshot['changed_files'] = 2
+        def api(repo, path):
+            if path == 'pulls/7':
+                return snapshot
+            if path.startswith('pulls/7/files'):
+                return [{'filename': name, 'status': 'modified',
+                         'patch': '@@ -1 +1 @@\n-old\n+new'} for name in ('src/a.py', 'src/b.py')]
+            if path.startswith('contents/'):
+                value = 'x' * (40 if path.endswith(HEAD) else 80)
+                return {'type': 'file', 'encoding': 'base64',
+                        'content': base64.b64encode(value.encode()).decode()}
+            if path.startswith('git/trees/'):
+                return {'tree': []}
+            return self.api(repo, path)
+        cfg = settings()
+        cfg['limits']['context_chars'] = 150
+        data = context.collect(REPO, 7, snapshot, cfg, state.initial(REPO, 7), api=api)
+        self.assertTrue(all(item['head_text'] == 'x' * 40 for item in data['files']))
+        self.assertTrue(all(item['base_text'] is None for item in data['files']))
+        self.assertEqual({item['reason'] for item in data['omitted']}, {'base_text_unavailable_or_budget'})
+
     def test_changed_snapshot_is_rejected(self):
         def api(repo, path):
             if path == 'pulls/7':

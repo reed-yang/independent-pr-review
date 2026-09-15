@@ -174,9 +174,13 @@ def collect(repo, number, pr, config, state, force_full=False, api=github):
         packet['omitted'].append({'path': '<base-context>', 'reason': 'merge_base_unavailable'})
     for entry in packet['files']:
         if entry['status'] != 'removed':
-            add_text(entry, 'head_text', entry['path'], head)
+            if not add_text(entry, 'head_text', entry['path'], head):
+                packet['omitted'].append({'path': entry['path'], 'reason': 'head_text_unavailable_or_budget'})
+    # Complete current changed-file evidence before spending on old versions.
+    for entry in packet['files']:
         if merge_base and entry['status'] != 'added':
-            add_text(entry, 'base_text', entry.get('previous_filename', entry['path']), merge_base)
+            if not add_text(entry, 'base_text', entry.get('previous_filename', entry['path']), merge_base):
+                packet['omitted'].append({'path': entry['path'], 'reason': 'base_text_unavailable_or_budget'})
     try:
         tree = reader.get(f'git/trees/{head}?recursive=1')
         if tree.get('truncated'):
