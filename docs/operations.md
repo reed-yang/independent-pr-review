@@ -93,3 +93,15 @@ The archived PR13 Chat stream connected in 0.37s, returned HTTP 200 at 5.03s and
 received 305 events/101733 bytes, but hit its 600s deadline without recognized final
 content. That proves a response-phase failure, not a connection or HTTP auth error;
 its old counters cannot distinguish reasoning from protocol mismatch.
+
+The native Responses replay also reached 600s: HTTP 200 at 3.91s, 30 recognized
+reasoning events (333 characters), and no content events. The request was accepted
+but upstream generation/scheduling did not yield final text within the deadline;
+these counters do not reveal internal thinking throughput or the gateway queue.
+Large-PR Grok completion therefore remains unqualified. Do not treat either timeout
+as a clean review or silently lower effort/coverage to make acceptance pass.
+
+Normal hosted acceptance on Cortex #18 completed with Grok at 28.35s and native
+Gemini at 13.54s, producing one English summary. Prepare/review/publish used
+13s/34s/7s (54s summed runner time). That packet had one changed file and five
+related files, about 15k estimated input tokens; it is not a large-context benchmark.
