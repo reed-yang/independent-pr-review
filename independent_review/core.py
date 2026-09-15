@@ -365,7 +365,27 @@ def run_reviews(packet, config, runners=None, dry_run=False):
             "coverage": packet["coverage"], "omitted": packet["omitted"], "reviews": results}
 
 
+def failure_description(attempt):
+    """Explain known transport outcomes without publishing provider error text."""
+    error = attempt.get('error')
+    diagnostics = attempt.get('diagnostics') or {}
+    if error == 'provider_stream_error':
+        reason = diagnostics.get('incomplete_reason')
+        if reason in ('max_output_tokens', 'max_prompt_tokens', 'max_time_limit'):
+            limit = {'max_output_tokens': 'output', 'max_prompt_tokens': 'input', 'max_time_limit': 'time'}[reason]
+            return f'The upstream ended the response at its {limit} limit before a complete review was available.'
+        return 'The upstream reported an error before a complete review was available.'
+    if error in ('provider_deadline_exceeded', 'provider_progress_timeout', 'provider_idle_timeout'):
+        if diagnostics.get('stage') == 'read' and diagnostics.get('http_status') == 200:
+            if type(diagnostics.get('content_events')) is int and diagnostics['content_events'] == 0:
+                note = 'The request was accepted, but no final review text arrived before the configured time limit.'
+                if type(diagnostics.get('reasoning_events')) is int and diagnostics['reasoning_events'] > 0:
+                    note += ' Reasoning updates were received; they do not establish a completed review.'
+                return note
+            return 'The response did not complete before the configured time limit.'
+    return None
+
+
 def plain(value):
     # Render model content as quoted plain text, without links or mentions.
     return html.escape(str(value)).replace("@", "＠").replace("`", "ˋ").replace("[", "［").replace("]", "］").replace("\n", " ")
-

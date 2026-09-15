@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from independent_review import cli, core, context, evidence, service, state, transport
+from independent_review import cli, core, context, delivery, evidence, service, state, transport
 from test_engine import BASE, HEAD, REPO, answer, bundle, candidate, packet, pr, settings
 
 
@@ -74,6 +74,35 @@ class EvidenceTests(unittest.TestCase):
         reserved = state.reserve(bundle()['state'], bundle(), '1', 'url')
         accepted = state.accept(reserved, result, '1')
         self.assertFalse(accepted['lanes'])
+
+    def test_summary_explains_reasoning_timeout_without_raw_error_or_clean_result(self):
+        data = bundle()
+        def failed(*args):
+            raise core.ReviewError('provider_deadline_exceeded', {
+                'stage': 'read', 'http_status': 200, 'reasoning_events': 30, 'content_events': 0,
+                'untrusted_error_body': 'private provider error text'})
+        result = service.run(data, {'compatible_packet': failed,
+                                   'antigravity_packet': lambda *args: (answer(), 'gemini', {})})
+        accepted = state.accept(state.reserve(data['state'], data, '1', 'url'), result, '1')
+        rendered = delivery.summary(accepted, data['config']['limits'])
+        self.assertIn('no final review text arrived before the configured time limit', rendered)
+        self.assertIn('Reasoning updates were received', rendered)
+        self.assertIn('Do not interpret this status as a clean review', rendered)
+        self.assertNotIn('private provider error text', rendered)
+        self.assertNotIn('Grok', accepted['lanes'])
+
+    def test_cached_success_does_not_display_a_later_failed_attempt_note(self):
+        value = state.initial(REPO, 7)
+        value.update(status='partial', runs=3, tokens=1234, last_reviews=[{
+            'slot': 'Grok', 'status': 'failed', 'errors': ['provider_deadline_exceeded'],
+            'failure_notes': ['The failed force-review attempt timed out.'], 'rejected_count': 1}])
+        reused = state.reuse(value, 'https://github.com/owner/project/actions/runs/2')
+        rendered = delivery.summary(reused, settings()['limits'])
+        self.assertNotIn('timed out', rendered)
+        self.assertNotIn('provider_deadline_exceeded', rendered)
+        self.assertNotIn('rejected candidate', rendered)
+        self.assertEqual((reused['runs'], reused['tokens']), (3, 1234))
+        self.assertEqual(value['last_reviews'][0]['status'], 'failed')
 
 
 class StreamingTests(unittest.TestCase):

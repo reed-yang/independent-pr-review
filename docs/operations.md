@@ -19,6 +19,9 @@ The summary is advisory. A provider/verification failure is partial or failed,
 never an empty clean result. Workflow publication fails on incomplete review after
 writing the truthful summary. A cancelled workflow can retain an in-progress
 reservation; the next eligible run remains charged for it. Read its run link.
+Known transport failures include a short English explanation in the PR summary;
+raw provider error text is never used as comment prose. Reusing a successful
+snapshot clears transient failure notes without refunding consumed run budget.
 
 ## Failure recovery
 
