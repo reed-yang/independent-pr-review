@@ -84,6 +84,20 @@ reports usable usage; missing usage retains an estimate. Run count is a hard per
 limit; token accounting is a soft guard, not a provider-side spend ceiling. Native
 subscription usage is not assigned an invented dollar cost.
 
+Each provider has an explicit effort and context window. Preparation records their
+resolved values in the configuration identity; a change invalidates old cache reuse.
+Generation and verification project the shared packet separately for that provider,
+preserving whole diffs and requested verification evidence. Optional source is
+trimmed first; an irreducible oversized verification packet fails without calling a
+model. Reports retain lane-specific omissions and estimated prompt sizes; compact
+signed cache entries keep omission counts instead of unbounded path lists.
+
+The larger collector ceiling is 4M characters, not 4M tokens. Estimates use UTF-8
+bytes/3 with a ten-percent window reserve, not a provider tokenizer. API rejection
+or native truncation is still an explicit incomplete review. Effort is requested
+through `reasoning_effort` for Grok, `--effort` and the pinned variant slug for agy,
+and `thinkingConfig.thinkingLevel` for the optional Gemini HTTP backend.
+
 Each family advances its baseline only on completed generation and verification.
 Same base/head/config/engine/model reuses a successful result. New heads use a
 bounded ancestor comparison; force pushes, rebases, changed base/config, missing

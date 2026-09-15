@@ -39,6 +39,10 @@ def summary(state, limits):
               'no_reviewable_changed_text': 'No reviewable text changes'}
     for lane in state.get('last_reviews', []):
         name = lane['slot'] + (' · ' + lane['model'] if lane.get('model') else '')
+        if lane.get('effort'):
+            name += ' · ' + lane['effort']
+        if lane.get('context_window_tokens'):
+            name += ' · ' + format(lane['context_window_tokens'], ',') + ' context'
         scope = scopes.get(lane.get('scope'), (lane.get('scope') or 'Pending').replace('_', ' '))
         cells = (name, (lane.get('status') or 'pending').capitalize(), scope)
         lines.append('| ' + ' | '.join(plain(cell).replace('|', '／') for cell in cells) + ' |')
@@ -68,6 +72,10 @@ def report(result):
                           f"  {plain(finding['body'])}"])
         for limitation in lane.get('limitations', []):
             lines.append(f'- Limitation: {plain(limitation)}')
+        if lane.get('input_context'):
+            context = lane['input_context']
+            lines.append(f"- Input: estimated {context['estimated_prompt_tokens']:,} tokens; configured window {context['context_window_tokens']:,}; effort {lane.get('effort') or 'default'}.")
+            lines.append(f"- Lane-specific omissions: {len(context.get('omitted', [])) if 'omitted' in context else context.get('omitted_count', 0)}. Estimates reserve space for native overhead and output; they are not exact tokenizer counts.")
     lines.extend(['', '## Verification', ''])
     for finding in result['findings']:
         lines.append(f"- `{finding['finding_id']}` **{finding['status']}**: {plain(finding['verification']['reason'])}")

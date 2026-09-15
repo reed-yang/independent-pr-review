@@ -42,7 +42,7 @@ class Reader:
         self.cache[path] = value
         return value
 
-    def text(self, path, sha, max_chars=30000):
+    def text(self, path, sha, max_chars=120000):
         if not safe_path(path):
             return None
         content = self.get(f'contents/{quote(path, safe="/")}?ref={sha}')

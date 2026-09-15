@@ -31,3 +31,21 @@ The first release deliberately uses deterministic source retrieval and the alrea
 qualified native agy harness. Organizations needing unrestricted repository tools,
 untrusted-fork credentials, multi-repository account scheduling or semantic history
 indexing need additional isolation/infrastructure before enabling those capabilities.
+
+
+## Current model capability evidence
+
+The v0.2 configuration uses Gemini 3.8 Flash Medium through native agy, and Grok
+4.6 with xhigh effort. The operator explicitly accepted Grok's 500k ceiling while
+requesting Gemini's 1M window. These are supported model capacities, not results of
+a full-window benchmark:
+
+- [Gemini 3.8 Flash model specification](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash):
+  1,048,576 input tokens, 65,536 output tokens, low/medium/high thinking.
+- [agy headless model and effort selection](https://antigravity.google/docs/cli/headless/):
+  stable Flash variant slugs and the explicit `--effort` flag. The installed 1.2.2
+  CLI's live model list includes `gemini-3.8-flash-medium`.
+- [Grok 4.6 model specification](https://docs.x.ai/developers/models/grok-4.6)
+  and [reasoning configuration](https://docs.x.ai/developers/model-capabilities/text/reasoning):
+  500,000 context tokens and explicit xhigh support. A larger number in client
+  configuration cannot increase that provider limit.

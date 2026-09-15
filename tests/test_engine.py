@@ -293,6 +293,63 @@ class VerificationTests(unittest.TestCase):
             service.parse_decisions(json.dumps({'decisions': [decision]}), packet(), [item])
 
 
+class ContextWindowTests(unittest.TestCase):
+    def test_context_projection_is_per_lane_and_preserves_whole_patches(self):
+        data = packet()
+        data['context'] = [{'path': 'large_related.py', 'head_text': 'x' * 1600000}]
+        grok = {'harness': 'compatible_packet', 'default_context_window_tokens': 500000, 'default_effort': 'xhigh'}
+        gemini = {'harness': 'antigravity_packet', 'default_context_window_tokens': 1048576, 'default_effort': 'medium'}
+        small, small_meta = service.fit_packet(data, grok)
+        large, large_meta = service.fit_packet(data, gemini)
+        self.assertEqual(small['context'], [])
+        self.assertEqual(len(large['context']), 1)
+        self.assertEqual(small['files'][0]['patch'], data['files'][0]['patch'])
+        self.assertEqual(len(data['context']), 1)
+        self.assertTrue(small_meta['omitted'])
+        self.assertFalse(large_meta['omitted'])
+        self.assertLessEqual(large_meta['estimated_prompt_tokens'], large_meta['input_budget_tokens'])
+
+    def test_required_verification_evidence_is_not_silently_removed(self):
+        data = packet()
+        data['files'][0]['patch'] = '@@ -0,0 +1 @@\n+' + 'x' * 2000000
+        with self.assertRaisesRegex(core.ReviewError, 'required_evidence_exceeds'):
+            service.fit_packet(data, {'harness': 'compatible_packet', 'default_context_window_tokens': 500000}, [candidate()])
+
+    def test_known_model_limits_and_native_effort_mismatch_fail_closed(self):
+        backend = {'model_env': 'MODEL', 'effort_env': 'EFFORT', 'context_window_env': 'WINDOW', 'harness': 'compatible_packet'}
+        with patch.dict(os.environ, {'MODEL': 'grok-4.6', 'EFFORT': 'xhigh', 'WINDOW': '1048576'}):
+            with self.assertRaisesRegex(core.ReviewError, 'exceeds_model_capacity'):
+                core.runtime_settings(backend)
+        with patch.dict(os.environ, {'MODEL': 'gemini-3.8-flash-high', 'EFFORT': 'medium', 'WINDOW': '1048576'}):
+            with self.assertRaisesRegex(core.ReviewError, 'native_model_effort_mismatch'):
+                core.runtime_settings({**backend, 'harness': 'antigravity_packet'})
+
+    def test_large_context_reservation_fits_the_updated_pr_budget(self):
+        data = bundle()
+        data['packet']['description'] = 'x' * 3000000
+        data['config']['runtime'] = {'Grok': {'input_budget_tokens': 450000}, 'Gemini': {'input_budget_tokens': 943719}}
+        reserved = state.reserve(data['state'], data, '1:1', 'url')
+        self.assertGreater(reserved['tokens'], 2000000)
+        self.assertLess(reserved['tokens'], data['config']['limits']['max_tokens_per_pr'])
+
+    def test_explicit_effort_reaches_each_http_protocol(self):
+        backends = settings()['backends']['backends']
+        environment = {'GROK_MODEL': 'grok-4.6', 'GROK_BASE_URL': 'https://gateway.example/v1', 'GROK_API_KEY': 'fixture',
+                       'GROK_EFFORT': 'xhigh', 'GROK_CONTEXT_WINDOW': '500000', 'GEMINI_MODEL': 'gemini-3.8-flash',
+                       'GEMINI_BASE_URL': 'https://gateway.example/v1beta', 'GEMINI_API_KEY': 'fixture',
+                       'GEMINI_EFFORT': 'medium', 'GEMINI_CONTEXT_WINDOW': '1048576'}
+        def response(url, token, payload, **kwargs):
+            if 'chat/completions' in url:
+                self.assertEqual(payload['reasoning_effort'], 'xhigh')
+                self.assertNotIn('context_window', payload)
+                return {'choices': [{'finish_reason': 'stop', 'message': {'content': answer()}}]}
+            self.assertEqual(payload['generationConfig']['thinkingConfig']['thinkingLevel'], 'MEDIUM')
+            return {'candidates': [{'finishReason': 'STOP', 'content': {'parts': [{'text': answer()}]}}]}
+        with patch.dict(os.environ, environment, clear=True), patch.object(core, 'request_json', side_effect=response):
+            core.run_compatible(backends['grok-gateway'], 'small packet')
+            core.run_gemini(backends['gemini-gateway'], 'small packet')
+
+
 class CommandAndDeliveryTests(unittest.TestCase):
     def event(self, body, user_type='User'):
         return {'action': 'created', 'issue': {'number': 7, 'pull_request': {}},
