@@ -149,6 +149,15 @@ class ContextTests(unittest.TestCase):
         self.assertLessEqual(data['context_reads'], settings()['limits']['max_api_reads'])
         self.assertFalse(data['full_repository_review'])
 
+    def test_bare_relative_import_does_not_select_the_entire_repository(self):
+        paths = ['src/api/app.py']
+        entries = [{'head_text': 'from . import handlers\nfrom ..shared import value\n', 'patch': ''}]
+        tree = [{'type': 'blob', 'path': path} for path in
+                ('src/api/handlers.py', 'src/shared.py', 'unrelated/build.py')]
+        selected = dict(context.related_candidates(paths, entries, tree, {}))
+        self.assertEqual(selected, {'src/shared.py': 'import_dependency',
+                                    'src/api/handlers.py': 'sibling_module'})
+
     def test_changed_snapshot_is_rejected(self):
         def api(repo, path):
             if path == 'pulls/7':
