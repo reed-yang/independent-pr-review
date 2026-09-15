@@ -1,6 +1,9 @@
 import base64
 import copy
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -161,6 +164,22 @@ class ContextTests(unittest.TestCase):
         baseline['head_sha'] = 'd' * 40
         reader = context.Reader(REPO, 10, lambda *args: {'status': 'diverged'})
         self.assertIsNone(context.incremental(reader, baseline, pr(), 'config', False)[0])
+
+    def test_repository_metadata_route_has_no_trailing_slash(self):
+        with patch.dict(os.environ, {'GH_TOKEN': 'test-token'}), patch.object(core, 'request_json', return_value={}) as request:
+            core.github(REPO, '')
+        self.assertEqual(request.call_args.args[0], 'https://api.github.com/repos/' + REPO)
+
+    def test_action_launcher_cannot_import_consumer_shadow_package(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            shadow = Path(directory) / 'independent_review'
+            shadow.mkdir()
+            (shadow / '__init__.py').write_text('raise RuntimeError("consumer code executed")')
+            result = subprocess.run([sys.executable, '-I', str(root / 'scripts/action_phase.py'), 'cli', 'validate-config',
+                                     '--root', str(root), '--config', 'examples/review.json', '--out', directory],
+                                    cwd=directory, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_policy_cannot_escape_trusted_checkout(self):
         with tempfile.TemporaryDirectory() as root:

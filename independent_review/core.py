@@ -56,7 +56,7 @@ def github(repo, path, data=None, method=None):
     token = os.environ.get("GH_TOKEN", "")
     if not token:
         raise ReviewError("missing_github_token")
-    return request_json(f"https://api.github.com/repos/{repo}/{path}", token, data, method)
+    return request_json(f"https://api.github.com/repos/{repo}" + ("/" + path if path else ""), token, data, method)
 
 
 def digest(value):
