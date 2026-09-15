@@ -56,7 +56,7 @@ def load(root, path):
             raise ReviewError('unsupported_harness')
         if backend.get('api', 'chat_completions') not in ('chat_completions', 'responses'):
             raise ReviewError('unsupported_compatible_api')
-        if type(backend.get('timeout_seconds')) is not int or not 10 <= backend['timeout_seconds'] <= 1800:
+        if type(backend.get('timeout_seconds')) is not int or not 10 <= backend['timeout_seconds'] <= 3600:
             raise ReviewError('invalid_provider_timeout')
         for field in ('connect_timeout_seconds', 'idle_timeout_seconds', 'progress_timeout_seconds'):
             if field in backend and (type(backend[field]) is not int or not 1 <= backend[field] <= backend['timeout_seconds']):

@@ -85,9 +85,9 @@ jobs:
     concurrency:
       group: agy-subscription-account
       cancel-in-progress: false
-    # Two sequential stages can each use Grok's 30-minute inference budget.
+    # Two sequential stages can each use Grok's 60-minute inference budget.
     # Successful calls return immediately; this is a hard ceiling, not a wait.
-    timeout-minutes: 65
+    timeout-minutes: 125
     permissions: {}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

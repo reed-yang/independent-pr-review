@@ -431,13 +431,13 @@ class ReasoningBudgetTests(unittest.TestCase):
         data = bundle()
         grok = data['config']['runtime']['Grok']
         self.assertEqual(grok['context_window_tokens'], 500000)
-        self.assertEqual(grok['output_reserve_tokens'], 60000)
+        self.assertEqual(grok['output_reserve_tokens'], 128000)
         self.assertLessEqual(grok['input_budget_tokens'] + grok['output_reserve_tokens'], 500000)
         reserved = state.reserve(data['state'], data, '1', 'url')
         legacy = copy.deepcopy(data)
         legacy['config']['runtime']['Grok']['output_reserve_tokens'] = 6500
         old = state.reserve(legacy['state'], legacy, '1', 'url')
-        self.assertEqual(reserved['tokens'] - old['tokens'], 2 * (60000 - 6500))
+        self.assertEqual(reserved['tokens'] - old['tokens'], 2 * (128000 - 6500))
 
     def test_missing_generation_and_verification_usage_retain_reasoning_reserve(self):
         data = bundle()
@@ -447,11 +447,11 @@ class ReasoningBudgetTests(unittest.TestCase):
                    'antigravity_packet': lambda *args: (answer(), 'gemini', {'total_tokens': 10})}
         result = service.run(data, runners)
         grok = next(lane for lane in result['reviews'] if lane['slot'] == 'Grok')
-        self.assertEqual(result['accounted_tokens'], grok['input_context']['estimated_prompt_tokens'] + 60000 + 10)
+        self.assertEqual(result['accounted_tokens'], grok['input_context']['estimated_prompt_tokens'] + 128000 + 10)
         config = data['config']['backends']
         checked = service.verify(config['slots'][0], config, data['packet'], [candidate()], runners)
         self.assertEqual(checked['accounted_tokens'],
-                         core.estimate_tokens(service.verification_prompt(data['packet'], [candidate()])) + 60000)
+                         core.estimate_tokens(service.verification_prompt(data['packet'], [candidate()])) + 128000)
 
     def test_invalid_or_context_exhausting_completion_reserve_fails_before_inference(self):
         for reserve in (True, 0, 6499, 500000):
