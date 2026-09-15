@@ -123,6 +123,6 @@ code packets as repository source with the repository's artifact access controls
 
 Grok uses bounded SSE transport with separate connect, idle and total deadlines.
 Only final content, selected usage counts and redacted timing/event metrics survive;
-reasoning deltas, raw error bodies and headers are not retained. A terminal stream
-marker and normal finish are required. Native installation overlaps the Grok call
+reasoning deltas, raw error bodies and headers are not retained. A terminal completed Responses event (or Chat stream
+marker and normal finish for explicitly selected Chat backends) is required. Native installation overlaps the Grok call
 and uses the existing pinned, checksum-verified official archive.

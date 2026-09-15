@@ -382,7 +382,7 @@ class ContextWindowTests(unittest.TestCase):
             self.assertTrue(payload['stream_options']['include_usage'])
             return response(url, token, payload)['choices'][0]['message']['content'], 'grok-4.6', {}
         with patch.dict(os.environ, environment, clear=True), patch.object(core, 'request_json', side_effect=response), patch('independent_review.transport.completion', side_effect=stream):
-            core.run_compatible(backends['grok-gateway'], 'small packet')
+            core.run_compatible({**backends['grok-gateway'], 'api': 'chat_completions'}, 'small packet')
             core.run_gemini(backends['gemini-gateway'], 'small packet')
 
 

@@ -227,6 +227,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_optional_gateway_config_uses_independent_keys_and_protocols(self):
         self.config["slots"][1]["backends"] = ["gemini-gateway"]
+        self.config["backends"]["grok-gateway"]["api"] = "chat_completions"
         def reply(url, key, data, **kwargs):
             if "/chat/completions" in url:
                 self.assertEqual(key, "grok-secret")

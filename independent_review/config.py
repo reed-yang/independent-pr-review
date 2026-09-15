@@ -54,6 +54,8 @@ def load(root, path):
                 effective[backend[key]] = os.environ.get(backend[key], '')
         if backend.get('harness') not in ('compatible_packet', 'gemini_packet', 'antigravity_packet'):
             raise ReviewError('unsupported_harness')
+        if backend.get('api', 'chat_completions') not in ('chat_completions', 'responses'):
+            raise ReviewError('unsupported_compatible_api')
         if not 10 <= backend.get('timeout_seconds', 0) <= 600:
             raise ReviewError('invalid_provider_timeout')
         for field in ('connect_timeout_seconds', 'idle_timeout_seconds'):

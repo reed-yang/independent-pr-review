@@ -81,3 +81,15 @@ Engine CI has no provider Secrets. Consumer runs validate actual gateway/OAuth
 access. Protect release tags and default-branch workflow/config changes according
 to the collaboration model of each project. Do not install the review as a required
 merge check until its quota, reliability and noise are understood for that project.
+
+
+The default Grok adapter uses native `/responses` with `reasoning.effort`, rather
+than relying on gateway conversion of Chat Completions. Custom compatible backends
+can explicitly set `api` to `chat_completions` or `responses`; this is part of the
+configuration identity, never an automatic fallback. Both use the same configured
+base URL/key/model. Responses streams require a completed terminal response with
+matching final text. Reports count reasoning events/characters without saving them.
+The archived PR13 Chat stream connected in 0.37s, returned HTTP 200 at 5.03s and
+received 305 events/101733 bytes, but hit its 600s deadline without recognized final
+content. That proves a response-phase failure, not a connection or HTTP auth error;
+its old counters cannot distinguish reasoning from protocol mismatch.

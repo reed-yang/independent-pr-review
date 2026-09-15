@@ -17,6 +17,7 @@ class Completion:
         self.model = None
         self.usage = {}
         self.done = False
+        self.counts = {'reasoning_events': 0, 'reasoning_chars': 0, 'content_events': 0}
 
     def event(self, data):
         if self.done:
@@ -28,6 +29,10 @@ class Completion:
             obj = json.loads(data)
             if not isinstance(obj, dict) or obj.get('error'):
                 raise ReviewError('provider_stream_error')
+            if isinstance(obj.get('type'), str) and obj['type'].startswith('response.'):
+                raise ReviewError('provider_protocol_mismatch')
+            if not isinstance(obj.get('choices'), list):
+                raise ReviewError('invalid_provider_response')
             if isinstance(obj.get('model'), str):
                 self.model = obj['model'][:200]
             if isinstance(obj.get('usage'), dict):
@@ -40,11 +45,16 @@ class Completion:
                 delta = choice.get('delta', choice.get('message', {}))
                 if delta.get('tool_calls') or delta.get('function_call'):
                     raise ReviewError('incomplete_or_unexpected_model_output')
+                reasoning = delta.get('reasoning_content')
+                if isinstance(reasoning, str) and reasoning:
+                    self.counts['reasoning_events'] += 1
+                    self.counts['reasoning_chars'] += len(reasoning)
                 content = delta.get('content')
                 if content is not None:
                     if not isinstance(content, str) or self.finish is not None:
                         raise ReviewError('invalid_provider_response')
                     self.parts.append(content)
+                    self.counts['content_events'] += bool(content)
                 if choice.get('finish_reason') is not None:
                     self.finish = choice['finish_reason']
         except (ValueError, AttributeError, TypeError, KeyError):
@@ -59,6 +69,63 @@ class Completion:
         return text, self.model or model, self.usage
 
 
+class ResponsesCompletion(Completion):
+    def event(self, data):
+        if data == '[DONE]':
+            if not self.done:
+                raise ReviewError('provider_stream_incomplete')
+            return
+        if self.done:
+            raise ReviewError('provider_data_after_done')
+        try:
+            obj = json.loads(data)
+            kind = obj.get('type')
+            if kind in ('error', 'response.failed', 'response.incomplete') or obj.get('error'):
+                raise ReviewError('provider_stream_error')
+            if kind == 'response.output_text.delta':
+                if not isinstance(obj.get('delta'), str):
+                    raise ReviewError('invalid_provider_response')
+                self.parts.append(obj['delta'])
+                self.counts['content_events'] += bool(obj['delta'])
+            elif kind in ('response.reasoning_summary_text.delta', 'response.reasoning_text.delta'):
+                delta = obj.get('delta')
+                if isinstance(delta, str) and delta:
+                    self.counts['reasoning_events'] += 1
+                    self.counts['reasoning_chars'] += len(delta)
+            elif kind in ('response.output_item.added', 'response.output_item.done'):
+                if obj.get('item', {}).get('type') not in ('message', 'reasoning'):
+                    raise ReviewError('incomplete_or_unexpected_model_output')
+            elif kind == 'response.completed' or obj.get('object') == 'response':
+                response = obj['response'] if kind == 'response.completed' else obj
+                if response.get('status') != 'completed' or response.get('error') or response.get('incomplete_details'):
+                    raise ReviewError('incomplete_or_unexpected_model_output')
+                output = response.get('output')
+                if not isinstance(output, list):
+                    raise ReviewError('invalid_provider_response')
+                parts = []
+                for item in output:
+                    if item.get('type') == 'reasoning':
+                        continue
+                    if item.get('type') != 'message' or item.get('role') != 'assistant' or item.get('status', 'completed') != 'completed':
+                        raise ReviewError('incomplete_or_unexpected_model_output')
+                    for part in item.get('content', []):
+                        if part.get('type') != 'output_text' or not isinstance(part.get('text'), str):
+                            raise ReviewError('incomplete_or_unexpected_model_output')
+                        parts.append(part['text'])
+                final = ''.join(parts)
+                if self.parts and ''.join(self.parts) != final:
+                    raise ReviewError('provider_stream_content_mismatch')
+                self.parts = parts
+                self.model = response.get('model') if isinstance(response.get('model'), str) else None
+                usage = response.get('usage') or {}
+                self.usage = {key: value for key, value in usage.items()
+                              if key in ('input_tokens', 'output_tokens', 'total_tokens')
+                              and type(value) is int and value >= 0}
+                self.finish, self.done = 'stop', True
+        except (ValueError, TypeError, AttributeError, KeyError):
+            raise ReviewError('invalid_provider_response') from None
+
+
 def completion(url, token, payload, backend):
     parsed = urlsplit(url)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
@@ -68,7 +135,8 @@ def completion(url, token, payload, backend):
     deadline = start + timeout
     idle = backend.get('idle_timeout_seconds', 120)
     connect_timeout = backend.get('connect_timeout_seconds', 20)
-    metrics = {'transport': 'stream', 'bytes_received': 0, 'events': 0}
+    metrics = {'transport': 'stream', 'api': backend.get('api', 'chat_completions'), 'bytes_received': 0, 'events': 0}
+    decoder = ResponsesCompletion() if backend.get('api') == 'responses' else Completion()
     stage = 'connect'
     conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443,
                                        timeout=min(connect_timeout, timeout), context=ssl.create_default_context())
@@ -105,7 +173,6 @@ def completion(url, token, payload, backend):
                 raise ReviewError(f'http_{response.status}')
             is_json = response.getheader('Content-Type', '').split(';')[0].strip() == 'application/json'
             stage = 'read'
-            decoder = Completion()
             pending, fields = b'', []
             while True:
                 read_timeout(sock)
@@ -141,6 +208,7 @@ def completion(url, token, payload, backend):
             elif not decoder.done:
                 raise ReviewError('provider_stream_incomplete')
             text, model, usage = decoder.result(payload['model'])
+            metrics.update(decoder.counts)
             metrics['elapsed_seconds'] = round(time.monotonic() - start, 2)
             return text, model, {**usage, 'transport': metrics}
     except (TimeoutError, socket.gaierror, ssl.SSLError, OSError, http.client.HTTPException, UnicodeError, ReviewError) as exc:
@@ -157,7 +225,7 @@ def completion(url, token, payload, backend):
             code = 'invalid_provider_response'
         else:
             code = 'provider_connection_error'
-        raise ReviewError(code, {**metrics, 'stage': stage,
+        raise ReviewError(code, {**metrics, **decoder.counts, 'stage': stage,
                                 'elapsed_seconds': round(time.monotonic() - start, 2)}) from None
     finally:
         conn.close()
