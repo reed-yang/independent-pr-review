@@ -1,0 +1,57 @@
+{
+  "slots": [
+    {
+      "id": "Grok",
+      "opinion_family": "grok",
+      "backends": [
+        "grok-gateway"
+      ]
+    },
+    {
+      "id": "Gemini",
+      "opinion_family": "gemini",
+      "backends": [
+        "gemini-ai-pro"
+      ]
+    }
+  ],
+  "backends": {
+    "grok-gateway": {
+      "harness": "compatible_packet",
+      "opinion_family": "grok",
+      "auth_mode": "gateway_api_key",
+      "base_url_env": "GROK_BASE_URL",
+      "key_env": "GROK_API_KEY",
+      "model_env": "GROK_MODEL",
+      "output_limit_parameter": "max_tokens",
+      "timeout_seconds": 240,
+      "fallback_on": [
+        "network_or_timeout",
+        "http_502",
+        "http_503",
+        "http_504"
+      ]
+    },
+    "gemini-gateway": {
+      "harness": "gemini_packet",
+      "opinion_family": "gemini",
+      "auth_mode": "gateway_api_key",
+      "base_url_env": "GEMINI_BASE_URL",
+      "key_env": "GEMINI_API_KEY",
+      "model_env": "GEMINI_MODEL",
+      "timeout_seconds": 300,
+      "fallback_on": []
+    },
+    "gemini-ai-pro": {
+      "harness": "antigravity_packet",
+      "opinion_family": "gemini",
+      "auth_mode": "google_ai_pro_subscription",
+      "binary_env": "AGY_BIN",
+      "state_env": "AGY_WORK_ROOT",
+      "oauth_env": "AGY_OAUTH_JSON",
+      "model_env": "GEMINI_MODEL",
+      "timeout_seconds": 300,
+      "fallback_on": []
+    }
+  }
+}

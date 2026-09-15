@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "independent-pr-review"
+version = "0.1.0"
+description = "Portable independent AI PR review with native agy OAuth"
+requires-python = ">=3.11"
+
+[project.scripts]
+independent-review = "independent_review.cli:main"
+
+[tool.setuptools]
+packages = ["independent_review"]
+
+[tool.setuptools.package-data]
+independent_review = ["*.json", "*.md"]

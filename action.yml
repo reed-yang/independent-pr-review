@@ -1,0 +1,63 @@
+name: Independent PR review phase
+description: Run one bounded phase of the portable Grok and native agy review harness
+inputs:
+  phase:
+    description: prepare, review, publish, fail, validate-config, or auth-check
+    required: true
+  root:
+    description: Trusted consumer checkout; never a PR head checkout
+    default: .
+  config:
+    description: Trusted consumer configuration relative to root
+    default: .github/review.json
+  output:
+    description: Temporary code handoff and normalized report directory
+    required: true
+  mode:
+    description: review, full, or dry-run
+    default: review
+outputs:
+  run:
+    description: Whether a model run was reserved
+    value: ${{ steps.phase.outputs.run }}
+  publish:
+    description: Whether publication was reserved
+    value: ${{ steps.phase.outputs.publish }}
+  pr_number:
+    description: Validated PR number
+    value: ${{ steps.phase.outputs.pr_number }}
+  status:
+    description: Normalized review status
+    value: ${{ steps.phase.outputs.status }}
+runs:
+  using: composite
+  steps:
+    - name: Install pinned official agy
+      if: inputs.phase == 'review' || inputs.phase == 'auth-check'
+      shell: bash
+      env:
+        REVIEW_ACTION_PATH: ${{ github.action_path }}
+      run: python3 "$REVIEW_ACTION_PATH/independent_review/install_agy.py" --out "$RUNNER_TEMP/independent-agy-bin/agy"
+    - name: Execute isolated review phase
+      id: phase
+      shell: bash
+      env:
+        REVIEW_ACTION_PATH: ${{ github.action_path }}
+        REVIEW_PHASE: ${{ inputs.phase }}
+        REVIEW_ROOT: ${{ inputs.root }}
+        REVIEW_CONFIG: ${{ inputs.config }}
+        REVIEW_OUTPUT: ${{ inputs.output }}
+        REVIEW_MODE: ${{ inputs.mode }}
+        AGY_BIN: ${{ runner.temp }}/independent-agy-bin/agy
+        AGY_WORK_ROOT: ${{ runner.temp }}/independent-agy-state
+      run: |
+        if [ "$REVIEW_PHASE" = auth-check ]; then
+          PYTHONPATH="$REVIEW_ACTION_PATH" python3 -m independent_review.agy_auth check
+        else
+          PYTHONPATH="$REVIEW_ACTION_PATH" python3 -m independent_review.cli "$REVIEW_PHASE" \
+            --root "$REVIEW_ROOT" --config "$REVIEW_CONFIG" --out "$REVIEW_OUTPUT" --mode "$REVIEW_MODE"
+        fi
+    - name: Remove private native state
+      if: always() && (inputs.phase == 'review' || inputs.phase == 'auth-check')
+      shell: bash
+      run: rm -rf -- "$RUNNER_TEMP/independent-agy-state"

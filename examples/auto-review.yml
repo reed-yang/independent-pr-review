@@ -1,0 +1,35 @@
+name: Independent PR review
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize, converted_to_draft, closed]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number
+        required: true
+        type: number
+      mode:
+        description: Review mode
+        type: choice
+        default: dry-run
+        options: [dry-run, review, full]
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: independent-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: false
+jobs:
+  review:
+    if: >-
+      github.ref_name == github.event.repository.default_branch &&
+      (github.event_name == 'workflow_dispatch' || vars.AUTO_REVIEW_ENABLED == 'true') &&
+      (github.event_name != 'issue_comment' ||
+       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review') && github.event.comment.user.type != 'Bot'))
+    # Replace with the reviewed reusable-workflow release SHA, not an engine SHA.
+    uses: reed-yang/independent-pr-review/.github/workflows/review.yml@RELEASE_COMMIT_SHA
+    with:
+      pr_number: ${{ inputs.pr_number && format('{0}', inputs.pr_number) || '' }}
+      mode: ${{ inputs.mode || 'review' }}
