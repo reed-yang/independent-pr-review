@@ -28,8 +28,18 @@ def summary(state, limits):
     elif state['status'] not in ('completed', 'ready'):
         lines.append('Review coverage is incomplete or work is pending. Do not interpret this status as a clean review.')
     lines.extend(['', '| Reviewer | Status | Scope |', '| --- | --- | --- |'])
+    scopes = {'missing_or_changed_configuration': 'Full review: new policy or first successful baseline',
+              'explicit_full_review': 'Full review requested', 'incremental': 'Changes since previous successful review',
+              'identical_successful_snapshot': 'Same base, head and configuration', 'base_changed': 'Full review: base changed',
+              'related_context_changed_full_review': 'Full review: related context changed',
+              'history_changed_or_compare_incomplete': 'Full review: history changed or comparison incomplete',
+              'comparison_unavailable': 'Full review: previous comparison unavailable',
+              'no_reviewable_changed_text': 'No reviewable text changes'}
     for lane in state.get('last_reviews', []):
-        lines.append('| ' + ' | '.join(plain(lane.get(key) or '—').replace('|', '／') for key in ('slot', 'status', 'scope')) + ' |')
+        name = lane['slot'] + (' · ' + lane['model'] if lane.get('model') else '')
+        scope = scopes.get(lane.get('scope'), (lane.get('scope') or 'Pending').replace('_', ' '))
+        cells = (name, (lane.get('status') or 'pending').capitalize(), scope)
+        lines.append('| ' + ' | '.join(plain(cell).replace('|', '／') for cell in cells) + ' |')
     lines.extend(['', '<details>', '<summary>Scope, budget and controls</summary>', '',
                   'The reviewers received bounded diff and related-source context. Repository code was not executed; no tests were run by this harness.',
                   f"Omitted inputs: {state.get('omitted_count', 0)}. Runs reserved: {state['runs']}/{limits['max_runs_per_pr']}. "

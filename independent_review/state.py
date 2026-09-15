@@ -131,3 +131,13 @@ def accept(state, result, run_id):
     value['omitted_count'] = len(result['omitted'])
     value['reservation'] = None
     return value
+
+
+def reuse(state, run_url):
+    value = copy.deepcopy(state)
+    value['status'] = 'completed'
+    value['last_run'] = run_url
+    value['reservation'] = None
+    value['last_reviews'] = [{**lane, 'status': 'reused', 'scope': 'identical_successful_snapshot'}
+                             for lane in value.get('last_reviews', [])]
+    return value

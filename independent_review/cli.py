@@ -113,8 +113,7 @@ def prepare(args):
             raise ReviewError('unknown_or_ambiguous_finding_id')
     packet = collect(repo, number, pr, config, prior, force_full=command == 'full' or command.startswith('verify:'))
     if all(lane['paths'] == [] for lane in packet['lanes'].values()):
-        prior['last_run'] = run_url
-        prior['last_reviews'] = [{**lane, 'status': 'reused'} for lane in prior.get('last_reviews', [])]
+        prior = state.reuse(prior, run_url)
         if publish:
             delivery.publish_inline(prior, config, default_branch)
             delivery.write_summary(prior, comment_id, key, config['limits'])

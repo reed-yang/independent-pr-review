@@ -109,6 +109,18 @@ class StateTests(unittest.TestCase):
         with self.assertRaises(core.ReviewError):
             state.accept(accepted, result, '1:1')
 
+    def test_resume_reuse_restores_completed_state_without_refunding_budget(self):
+        value = state.initial(REPO, 7)
+        value.update(status='ready', runs=3, tokens=1234,
+                     reservation={'run_id': 'interrupted'},
+                     last_reviews=[{'slot': 'Grok', 'status': 'completed', 'scope': 'full'}])
+        reused = state.reuse(value, 'https://github.com/owner/project/actions/runs/2')
+        self.assertEqual(reused['status'], 'completed')
+        self.assertEqual((reused['runs'], reused['tokens']), (3, 1234))
+        self.assertIsNone(reused['reservation'])
+        self.assertEqual(reused['last_reviews'][0]['scope'], 'identical_successful_snapshot')
+        self.assertEqual(value['status'], 'ready')
+
     def test_oversized_state_fails_before_comment_publication(self):
         value = state.initial(REPO, 7)
         value['extra'] = 'x' * state.MAX_RAW
