@@ -48,7 +48,7 @@ jobs:
           persist-credentials: false
       - name: Collect trusted policy and reserve review
         id: prepare
-        uses: reed-yang/independent-pr-review@1b86e0b24c0b08da9293a480a5f845456b0f6cec # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@6431291de77f76e6c978552f73b2ec1d55a62080 # engine pin; updated by scripts/pin_release.py
         with:
           phase: prepare
           config: ${{ inputs.config }}
@@ -89,7 +89,7 @@ jobs:
           name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/independent-review
       - name: Independent opinions and candidate verification
-        uses: reed-yang/independent-pr-review@1b86e0b24c0b08da9293a480a5f845456b0f6cec # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@6431291de77f76e6c978552f73b2ec1d55a62080 # engine pin; updated by scripts/pin_release.py
         with:
           phase: review
           output: ${{ runner.temp }}/independent-review
@@ -141,7 +141,7 @@ jobs:
           path: ${{ runner.temp }}/independent-review
         if: needs.review.result == 'success'
       - name: Update summary and verified inline findings
-        uses: reed-yang/independent-pr-review@1b86e0b24c0b08da9293a480a5f845456b0f6cec # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@6431291de77f76e6c978552f73b2ec1d55a62080 # engine pin; updated by scripts/pin_release.py
         with:
           phase: ${{ needs.review.result == 'success' && 'publish' || 'fail' }}
           output: ${{ runner.temp }}/independent-review
