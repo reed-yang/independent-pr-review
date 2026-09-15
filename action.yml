@@ -52,9 +52,9 @@ runs:
         AGY_WORK_ROOT: ${{ runner.temp }}/independent-agy-state
       run: |
         if [ "$REVIEW_PHASE" = auth-check ]; then
-          PYTHONPATH="$REVIEW_ACTION_PATH" python3 -m independent_review.agy_auth check
+          python3 -I "$REVIEW_ACTION_PATH/scripts/action_phase.py" agy_auth check
         else
-          PYTHONPATH="$REVIEW_ACTION_PATH" python3 -m independent_review.cli "$REVIEW_PHASE" \
+          python3 -I "$REVIEW_ACTION_PATH/scripts/action_phase.py" cli "$REVIEW_PHASE" \
             --root "$REVIEW_ROOT" --config "$REVIEW_CONFIG" --out "$REVIEW_OUTPUT" --mode "$REVIEW_MODE"
         fi
     - name: Remove private native state
