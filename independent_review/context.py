@@ -89,6 +89,9 @@ def related_candidates(paths, entries, tree, context):
         imports.extend(re.findall(r'(?:from\s+|import\s*\(?\s*)[\'\"]([^\'\"]+)[\'\"]', source))
         for module in re.findall(r'^\s*(?:from|import)\s+([\w.]+)', source, re.M):
             imports.append(module.replace('.', '/'))
+    # A bare relative import must not become the empty suffix, which matches
+    # every path. Nearby modules are still collected through the sibling rule.
+    imports = [module.lstrip('./') for module in imports if module.lstrip('./')]
     for path in available - set(paths):
         pure = PurePosixPath(path)
         roots = context.get('source_roots', [])
@@ -97,7 +100,7 @@ def related_candidates(paths, entries, tree, context):
         rank, reason = 0, ''
         if any(fnmatch(path, pattern) for pattern in context.get('include', [])):
             rank, reason = 100, 'configured_context'
-        if any(module and (str(pure.with_suffix('')).endswith(module.lstrip('./')) or pure.stem == PurePosixPath(module).name) for module in imports):
+        if any(str(pure.with_suffix('')).endswith(module) or pure.stem == PurePosixPath(module).name for module in imports):
             rank, reason = max(rank, 90), reason or 'import_dependency'
         if any(stem in pure.stem for stem in stems) and ('test' in path.lower() or 'spec' in path.lower()):
             rank, reason = max(rank, 80), reason or 'related_test'
@@ -171,9 +174,13 @@ def collect(repo, number, pr, config, state, force_full=False, api=github):
         packet['omitted'].append({'path': '<base-context>', 'reason': 'merge_base_unavailable'})
     for entry in packet['files']:
         if entry['status'] != 'removed':
-            add_text(entry, 'head_text', entry['path'], head)
+            if not add_text(entry, 'head_text', entry['path'], head):
+                packet['omitted'].append({'path': entry['path'], 'reason': 'head_text_unavailable_or_budget'})
+    # Complete current changed-file evidence before spending on old versions.
+    for entry in packet['files']:
         if merge_base and entry['status'] != 'added':
-            add_text(entry, 'base_text', entry.get('previous_filename', entry['path']), merge_base)
+            if not add_text(entry, 'base_text', entry.get('previous_filename', entry['path']), merge_base):
+                packet['omitted'].append({'path': entry['path'], 'reason': 'base_text_unavailable_or_budget'})
     try:
         tree = reader.get(f'git/trees/{head}?recursive=1')
         if tree.get('truncated'):
