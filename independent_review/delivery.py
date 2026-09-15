@@ -97,6 +97,9 @@ def report(result):
             lines.append(f"- Input: estimated {context['estimated_prompt_tokens']:,} tokens; configured window {context['context_window_tokens']:,}; effort {lane.get('effort') or 'default'}.")
             lines.append(f"- Lane-specific omissions: {len(context.get('omitted', [])) if 'omitted' in context else context.get('omitted_count', 0)}. Estimates reserve space for native overhead and output; they are not exact tokenizer counts.")
     lines.extend(['', '## Verification', ''])
+    for verification in result.get('verifications', []):
+        for rejected in verification.get('rejected_decisions', []):
+            lines.append(f"- {plain(verification['slot'])}: rejected decision `{rejected['finding_id']}` ({plain(rejected['error'])}); retained as uncertain. Redacted quote diagnostics are in result.json.")
     for finding in result['findings']:
         lines.append(f"- `{finding['finding_id']}` **{finding['status']}**: {plain(finding['verification']['reason'])}")
     if not result['findings']:

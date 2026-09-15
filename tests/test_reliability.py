@@ -75,6 +75,54 @@ class EvidenceTests(unittest.TestCase):
         accepted = state.accept(reserved, result, '1')
         self.assertFalse(accepted['lanes'])
 
+    def test_bad_verification_quote_preserves_valid_sibling_without_clean_cache(self):
+        data = bundle()
+        first = candidate()
+        second = core.parse_findings(answer([{**first, 'evidence': 'def first(value):'}]), data['packet'])['findings'][0]
+        def runner(backend, prompt):
+            if not prompt.startswith('Independently challenge'):
+                findings = [first, second] if backend['opinion_family'] == 'grok' else []
+                return answer(findings), 'model', {'total_tokens': 100}
+            decisions = [
+                {'finding_id': first['finding_id'], 'status': 'confirmed', 'reason': 'Empty input raises.',
+                 'evidence_path': first['path'], 'evidence': first['evidence']},
+                {'finding_id': second['finding_id'], 'status': 'dismissed', 'reason': 'A guard exists.',
+                 'evidence_path': second['path'], 'evidence': 'invented_guard()'}]
+            return json.dumps({'decisions': decisions}), 'model', {'total_tokens': 321}
+        result = service.run(data, {name: runner for name in core.HARNESSES})
+        self.assertEqual(result['status'], 'partial')
+        by_id = {item['finding_id']: item for item in result['findings']}
+        self.assertEqual(by_id[first['finding_id']]['status'], 'open')
+        self.assertEqual(by_id[second['finding_id']]['status'], 'uncertain')
+        verification = result['verifications'][0]
+        self.assertEqual(verification['status'], 'partial')
+        self.assertEqual(verification['accounted_tokens'], 321)
+        self.assertEqual(verification['rejected_decisions'][0]['finding_id'], second['finding_id'])
+        accepted = state.accept(state.reserve(data['state'], data, '1', 'url'), result, '1')
+        self.assertFalse(accepted['lanes'])
+        self.assertIn('Do not interpret this status as a clean review', delivery.summary(accepted, data['config']['limits']))
+        self.assertIn('retained as uncertain', delivery.report(result))
+
+    def test_partial_verification_still_rejects_duplicate_or_malformed_identity(self):
+        first, second = candidate(), {**candidate(), 'finding_id': 'a' * 24}
+        decision = {'finding_id': first['finding_id'], 'status': 'confirmed', 'reason': 'Trigger.',
+                    'evidence_path': first['path'], 'evidence': 'invented_guard()'}
+        for other in (decision, {**decision, 'finding_id': []}):
+            with self.subTest(other=other):
+                with self.assertRaisesRegex(core.ReviewError, 'invalid_verification_identity'):
+                    service.parse_decisions(json.dumps({'decisions': [decision, other]}), packet(),
+                                            [first, second], allow_partial=True)
+
+    def test_rejected_verification_quote_is_redacted_and_never_confirms_a_fix(self):
+        item = {**candidate(), 'previous': True}
+        decision = {'finding_id': item['finding_id'], 'status': 'fixed', 'reason': 'Fixed.',
+                    'evidence_path': item['path'], 'evidence': 'fixture-secret-key ' + 'x' * 5000}
+        with patch.dict(os.environ, {'GROK_API_KEY': 'fixture-secret-key'}):
+            parsed = service.parse_decisions(json.dumps({'decisions': [decision]}), packet(), [item], allow_partial=True)
+        self.assertEqual(parsed['decisions'][item['finding_id']]['status'], 'uncertain')
+        self.assertNotIn('fixture-secret-key', json.dumps(parsed))
+        self.assertLessEqual(len(parsed['rejected_decisions'][0]['evidence_preview']), 1000)
+
     def test_summary_explains_reasoning_timeout_without_raw_error_or_clean_result(self):
         data = bundle()
         def failed(*args):
