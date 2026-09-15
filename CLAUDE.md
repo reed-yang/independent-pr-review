@@ -14,6 +14,7 @@ Actions. Consumer repositories own domain policies, provider settings and Secret
   retain safe failure diagnostics and valid siblings, never cache partial lanes.
   Streaming progress is measured separately; an optional progress budget excludes keepalives.
 - state: authenticate per-PR state and reserve budget before inference.
+  Completion estimates include reasoning; visible-output caps do not bound it.
 - service: per-lane baselines, candidate verification and normalized outcomes.
 - delivery: one owned summary and verified inline threads; recheck eligibility,
   immutable identity and reservation before writing. No approval or merge action.

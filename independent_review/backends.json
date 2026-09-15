@@ -25,7 +25,8 @@
       "key_env": "GROK_API_KEY",
       "model_env": "GROK_MODEL",
       "output_limit_parameter": "max_tokens",
-      "timeout_seconds": 600,
+      "timeout_seconds": 1800,
+      "output_reserve_tokens": 60000,
       "connect_timeout_seconds": 20,
       "idle_timeout_seconds": 120,
       "fallback_on": [

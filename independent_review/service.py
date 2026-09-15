@@ -130,7 +130,7 @@ def verify(slot, config, packet, candidates, runners):
     try:
         packet, coverage = fit_packet(packet, backend, candidates)
         prompt = verification_prompt(packet, candidates)
-        estimate = estimate_tokens(prompt) + 6500
+        estimate = estimate_tokens(prompt) + coverage['output_reserve_tokens']
         raw, model, usage = runners[backend['harness']](backend, prompt)
         decisions = parse_decisions(raw, packet, candidates)
         return {'slot': slot['id'], 'status': 'completed', 'model': model, 'decisions': decisions,
@@ -174,7 +174,8 @@ def run(bundle, runners=None):
                 review['input_context'] = lane_coverage[slot['id']]
                 reviews.append(review)
     reviews.sort(key=lambda value: next(i for i, slot in enumerate(slots) if slot['id'] == value['slot']))
-    accounted = sum(usage_tokens(review.get('usage'), len(json.dumps(lane_packets[review['slot']]).encode()) // 3 + 6500)
+    accounted = sum(usage_tokens(review.get('usage'), lane_coverage[review['slot']]['estimated_prompt_tokens'] +
+                                lane_coverage[review['slot']]['output_reserve_tokens'])
                     for review in reviews if review['slot'] in lane_packets)
     candidates = {}
     for review in reviews:

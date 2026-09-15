@@ -93,7 +93,10 @@ model. Reports retain lane-specific omissions and estimated prompt sizes; compac
 signed cache entries keep omission counts instead of unbounded path lists.
 
 The larger collector ceiling is 4M characters, not 4M tokens. Estimates use UTF-8
-bytes/3 with a ten-percent window reserve, not a provider tokenizer. API rejection
+bytes/3 with at least a ten-percent window reserve, not a provider tokenizer.
+A larger configured completion reserve includes reasoning and visible output;
+Grok uses 60,000 tokens because its visible-output cap does not bound reasoning.
+Reservations and missing-usage accounting use the same per-provider reserve. API rejection
 or native truncation is still an explicit incomplete review. Effort is requested
 through `reasoning_effort` for Grok, `--effort` and the pinned variant slug for agy,
 and `thinkingConfig.thinkingLevel` for the optional Gemini HTTP backend.

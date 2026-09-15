@@ -28,7 +28,7 @@ snapshot clears transient failure notes without refunding consumed run budget.
 | Symptom | Action |
 | --- | --- |
 | `http_503`, no upstream accounts, quota errors | Fix the selected provider group/account and retry within the budget; no fallback is automatic. |
-| `provider_connect_timeout`, `provider_headers_timeout`, `provider_idle_timeout`, `provider_deadline_exceeded` | Inspect redacted stage, timing, byte and event counters in result.json. Connect defaults to 20s, response idle to 120s and total to 600s. Streaming keepalives do not extend the total deadline. No automatic retry spends another full call. |
+| `provider_connect_timeout`, `provider_headers_timeout`, `provider_idle_timeout`, `provider_deadline_exceeded` | Inspect redacted stage, timing, byte and event counters in result.json. Grok defaults to 20s connect, 120s socket idle and 1800s total for xhigh; Gemini remains at 600s total. Streaming keepalives do not extend the total deadline. No automatic retry spends another full call. |
 | `provider_progress_timeout` | No nonempty reasoning or final-text delta arrived within an explicitly configured `progress_timeout_seconds`. Disabled by default: silent internal reasoning can outlast visible summaries. Keepalive comments and status-only events do not renew this optional budget. Compare `last_byte_seconds`, `last_progress_seconds`, `seconds_without_progress` and `keepalive_lines`. This is an incomplete review, not proof of an upstream crash or a clean result. JSON responses that ignore streaming retain the existing socket/total limits because they expose no incremental progress. |
 | `provider_stream_error` with `incomplete_reason` | The upstream explicitly ended the response as incomplete. Inspect the allowlisted reason and numeric `provider_usage`, including `reasoning_tokens`; partial text is never accepted as a completed review. `max_output_tokens` semantics differ across providers and must not be assumed to bound internal reasoning. |
 | `provider_dns_error`, `provider_tls_error`, `provider_connection_error` | Check the configured gateway/network. Diagnostics never contain raw exceptions, headers, response bodies or credentials. |
@@ -62,6 +62,11 @@ consumer environment, product packages or repository tests are installed. Native
 agy is downloaded and checksum-verified in its own lane while Grok starts; the
 same verified binary serves a subsequent verification call in that job. Native
 OAuth/HOME state is never cached. Three credential-separated jobs are retained.
+The review job has a 65-minute ceiling for generation followed by verification;
+each stage can spend up to 30 minutes waiting for Grok. Successful calls return
+immediately, so this ceiling does not make small reviews wait. Grok reserves
+60,000 completion tokens for reasoning and visible output when usage is missing;
+this is conservative accounting, not a provider-enforced reasoning limit.
 
 Source collection reads immutable tree sizes before downloading optional source
 that cannot fit. On Cortex PR #13 this reduced API reads from 234 to 13 while

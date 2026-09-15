@@ -109,9 +109,13 @@ def runtime_settings(backend):
     if backend.get('harness') == 'antigravity_packet' and effort and model:
         if not model.endswith('-' + effort):
             raise ReviewError('native_model_effort_mismatch')
+    reserve = backend.get('output_reserve_tokens', 6500)
+    if type(reserve) is not int or not 6500 <= reserve < window:
+        raise ReviewError('invalid_output_reserve')
     return {'effort': effort, 'context_window_tokens': window,
-            'input_budget_tokens': window - max(16000, window // 10),
-            'token_estimation': 'utf8_bytes_divided_by_3_with_10_percent_window_reserve'}
+            'output_reserve_tokens': reserve,
+            'input_budget_tokens': window - max(16000, window // 10, reserve),
+            'token_estimation': 'utf8_bytes_divided_by_3_with_completion_and_window_reserve'}
 
 
 def check_context(backend, prompt):

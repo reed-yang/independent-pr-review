@@ -222,6 +222,20 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(result[2]['transport']['largest_progress_gap_seconds'], 299)
         self.assertEqual(result[2]['transport']['keepalive_lines'], 3)
 
+    def test_default_grok_budget_allows_the_observed_long_silent_completion(self):
+        backend = settings()['backends']['backends']['grok-gateway']
+        clock = SimpleNamespace(now=0)
+        reasoning = b'data: {"type":"response.reasoning_summary_text.delta","delta":"private"}\n\n'
+        final = ('data: '+json.dumps(ResponsesTests().response())+'\n\n').encode()
+        events = iter([(10, reasoning)] + [(i, b': ping\n\n') for i in range(100, 801, 100)] + [(843, final)])
+        def read(*args):
+            clock.now, chunk = next(events)
+            return chunk
+        result = self.invoke(api='responses', backend=backend, clock=lambda: clock.now, read_callback=read)
+        self.assertEqual(result[0], '{}')
+        self.assertEqual(result[2]['transport']['largest_progress_gap_seconds'], 833)
+        self.assertNotIn('progress_timeout_seconds', result[2]['transport'])
+
     def test_incomplete_response_preserves_only_safe_reason_and_usage(self):
         event = {'type': 'response.incomplete', 'response': {
             'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'},
@@ -362,6 +376,40 @@ class ResponsesTests(unittest.TestCase):
         self.assertEqual(payload['reasoning'], {'effort': 'xhigh'})
         self.assertEqual(payload['model'], 'grok-4.6')
         self.assertNotIn('messages', payload)
+
+
+class ReasoningBudgetTests(unittest.TestCase):
+    def test_reasoning_reserve_fits_the_requested_context_and_precharges_both_stages(self):
+        data = bundle()
+        grok = data['config']['runtime']['Grok']
+        self.assertEqual(grok['context_window_tokens'], 500000)
+        self.assertEqual(grok['output_reserve_tokens'], 60000)
+        self.assertLessEqual(grok['input_budget_tokens'] + grok['output_reserve_tokens'], 500000)
+        reserved = state.reserve(data['state'], data, '1', 'url')
+        legacy = copy.deepcopy(data)
+        legacy['config']['runtime']['Grok']['output_reserve_tokens'] = 6500
+        old = state.reserve(legacy['state'], legacy, '1', 'url')
+        self.assertEqual(reserved['tokens'] - old['tokens'], 2 * (60000 - 6500))
+
+    def test_missing_generation_and_verification_usage_retain_reasoning_reserve(self):
+        data = bundle()
+        def failed(*args):
+            raise core.ReviewError('provider_deadline_exceeded')
+        runners = {'compatible_packet': failed,
+                   'antigravity_packet': lambda *args: (answer(), 'gemini', {'total_tokens': 10})}
+        result = service.run(data, runners)
+        grok = next(lane for lane in result['reviews'] if lane['slot'] == 'Grok')
+        self.assertEqual(result['accounted_tokens'], grok['input_context']['estimated_prompt_tokens'] + 60000 + 10)
+        config = data['config']['backends']
+        checked = service.verify(config['slots'][0], config, data['packet'], [candidate()], runners)
+        self.assertEqual(checked['accounted_tokens'],
+                         core.estimate_tokens(service.verification_prompt(data['packet'], [candidate()])) + 60000)
+
+    def test_invalid_or_context_exhausting_completion_reserve_fails_before_inference(self):
+        for reserve in (True, 0, 6499, 500000):
+            with self.subTest(reserve=reserve), self.assertRaisesRegex(core.ReviewError, 'invalid_output_reserve'):
+                core.runtime_settings({'harness': 'compatible_packet', 'default_context_window_tokens': 500000,
+                                       'output_reserve_tokens': reserve})
 
 
 class CollectionEfficiencyTests(unittest.TestCase):
