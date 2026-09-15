@@ -8,7 +8,7 @@ import re
 import subprocess
 
 from .agy_runner import AgyError, oauth_document, run
-from .core import ReviewError, parse_findings
+from .core import ReviewError, parse_findings, runtime_settings
 
 
 def sync(source, repo):
@@ -56,7 +56,7 @@ def check():
         raise AgyError("agy_smoke_contract_failed")
     print(json.dumps({"status": "completed", "harness": "antigravity_packet",
                       "model": model, "native_refresh": "verified",
-                      "refresh_token": "unchanged", "usage": usage}))
+                      "refresh_token": "unchanged", "usage": usage, **runtime_settings(backend)}))
 
 
 if __name__ == "__main__":

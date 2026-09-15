@@ -8,7 +8,7 @@ import json
 import re
 import zlib
 
-from .core import ReviewError, digest, github
+from .core import ReviewError, digest, github, estimate_tokens
 
 
 MARKER = '<!-- independent-pr-review:v2 -->'
@@ -96,8 +96,9 @@ def reserve(state, bundle, run_id, run_url):
         raise ReviewError('review_run_budget_exhausted')
     # A conservative estimate stays charged after an interrupted run. The token
     # cap is an accounting guard, not a provider-side hard quota.
-    prompt_estimate = len(json.dumps(bundle['packet']).encode()) // 3 + 6500
-    estimate = prompt_estimate * 4
+    prompt_estimate = estimate_tokens(json.dumps(bundle['packet'], ensure_ascii=False))
+    estimate = 2 * sum(min(prompt_estimate + 40000, lane['input_budget_tokens']) + 6500
+                       for lane in bundle['config']['runtime'].values())
     if state['tokens'] + estimate > limits['max_tokens_per_pr']:
         raise ReviewError('review_token_budget_exhausted')
     value['runs'] += 1
@@ -119,6 +120,10 @@ def accept(state, result, run_id):
     value['tokens'] = max(0, state['tokens'] - reservation['estimated_tokens']) + result['accounted_tokens']
     for lane in result['reviews']:
         if lane['status'] == 'completed':
+            lane = copy.deepcopy(lane)
+            if 'input_context' in lane:
+                details = lane['input_context']
+                details['omitted_count'] = len(details.pop('omitted', []))
             value['lanes'][lane['slot']] = {'head_sha': result['head_sha'], 'base_sha': result['base_sha'],
                                           'config_id': result['config_id'], 'review': lane}
     for finding in result['findings']:
@@ -126,7 +131,7 @@ def accept(state, result, run_id):
         value['findings'][finding['finding_id']] = {**old, **finding, 'last_checked_sha': result['head_sha']}
     value['status'] = result['status']
     value['head_sha'], value['base_sha'] = result['head_sha'], result['base_sha']
-    value['last_reviews'] = [{key: lane.get(key) for key in ('slot', 'status', 'model', 'scope', 'error')} for lane in result['reviews']]
+    value['last_reviews'] = [{key: lane.get(key) for key in ('slot', 'status', 'model', 'scope', 'error', 'effort', 'context_window_tokens')} for lane in result['reviews']]
     value['coverage'] = result['coverage']
     value['omitted_count'] = len(result['omitted'])
     value['reservation'] = None

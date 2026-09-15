@@ -28,6 +28,7 @@ reservation; the next eligible run remains charged for it. Read its run link.
 | `agy_authentication_required`, refresh rotation | Log in interactively and resync encrypted OAuth; do not paste tokens in comments. |
 | Missing state/provider Secret in reusable jobs | Preserve explicit caller secret name mappings and the callee declarations; Environment binding alone can yield empty values. |
 | State signature mismatch | Restore the correct state key. Do not silently delete/reset state to bypass budgets. |
+| Context/effort configuration rejected | Use the actual model limit and supported effort. Grok 4.6 is 500k/xhigh; Gemini 3.8 Flash supports 1M and low/medium/high. |
 | Run or token budget exhausted | A trusted maintainer can review usage and raise the default-branch config cap in a reviewed change. Commands cannot raise it. |
 | Stale head/base at publication | Review the current snapshot; old results cannot be attached to the new SHA. |
 | Inline publication failed | Retry `/review`. Successful cached evidence can recover an already posted comment by its owned marker. |

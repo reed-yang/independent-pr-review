@@ -122,7 +122,8 @@ class AgyRunnerTests(unittest.TestCase):
             "token_type": "Bearer", "refresh_token": "original-refresh",
             "access_token": "original-access", "expiry": "2999-01-01T00:00:00Z"}}
         backend = {"binary_env": "AGY_BIN", "state_env": "AGY_WORK_ROOT", "model_env": "GEMINI_MODEL",
-                   "oauth_env": "AGY_OAUTH_JSON", "timeout_seconds": 3}
+                   "oauth_env": "AGY_OAUTH_JSON", "timeout_seconds": 3,
+                   "harness": "antigravity_packet", "default_effort": "medium"}
         seen = []
 
         def native(command, prompt, cwd, env, timeout, model):
@@ -143,13 +144,14 @@ class AgyRunnerTests(unittest.TestCase):
             self.assertIn("excludeDefaultComponents: true", agent.read_text())
             self.assertIn("inheritCustomizations: false", agent.read_text())
             self.assertNotIn("--json-schema", command)
+            self.assertEqual(command[command.index("--effort") + 1], "medium")
             state["token"].update(access_token="refreshed-access", expiry="2999-01-01T00:00:00Z")
             token.write_text(json.dumps(state))
             return '{"summary":"Reviewed","limitations":[],"findings":[]}', {}
 
         with tempfile.TemporaryDirectory() as root:
             with patch.dict(os.environ, {"AGY_BIN": sys.executable, "AGY_WORK_ROOT": root,
-                                         "GEMINI_MODEL": "gemini-test", "AGY_OAUTH_JSON": json.dumps(credential)}):
+                                         "GEMINI_MODEL": "gemini-3.8-flash-medium", "AGY_OAUTH_JSON": json.dumps(credential)}):
                 with patch.object(agy_runner, "stream_review", side_effect=native):
                     agy_runner.run(backend, "packet")
                     agy_runner.run(backend, "packet")

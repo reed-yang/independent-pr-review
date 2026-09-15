@@ -24,13 +24,17 @@
       "key_env": "GROK_API_KEY",
       "model_env": "GROK_MODEL",
       "output_limit_parameter": "max_tokens",
-      "timeout_seconds": 240,
+      "timeout_seconds": 600,
       "fallback_on": [
         "network_or_timeout",
         "http_502",
         "http_503",
         "http_504"
-      ]
+      ],
+      "effort_env": "GROK_EFFORT",
+      "context_window_env": "GROK_CONTEXT_WINDOW",
+      "default_effort": "xhigh",
+      "default_context_window_tokens": 500000
     },
     "gemini-gateway": {
       "harness": "gemini_packet",
@@ -39,8 +43,12 @@
       "base_url_env": "GEMINI_BASE_URL",
       "key_env": "GEMINI_API_KEY",
       "model_env": "GEMINI_MODEL",
-      "timeout_seconds": 300,
-      "fallback_on": []
+      "timeout_seconds": 600,
+      "fallback_on": [],
+      "effort_env": "GEMINI_EFFORT",
+      "context_window_env": "GEMINI_CONTEXT_WINDOW",
+      "default_effort": "medium",
+      "default_context_window_tokens": 1048576
     },
     "gemini-ai-pro": {
       "harness": "antigravity_packet",
@@ -50,8 +58,12 @@
       "state_env": "AGY_WORK_ROOT",
       "oauth_env": "AGY_OAUTH_JSON",
       "model_env": "GEMINI_MODEL",
-      "timeout_seconds": 300,
-      "fallback_on": []
+      "timeout_seconds": 600,
+      "fallback_on": [],
+      "effort_env": "GEMINI_EFFORT",
+      "context_window_env": "GEMINI_CONTEXT_WINDOW",
+      "default_effort": "medium",
+      "default_context_window_tokens": 1048576
     }
   }
 }

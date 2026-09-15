@@ -39,7 +39,11 @@ to merge. Missing context and incomplete provider runs remain visible.
    `REVIEW_STATE_KEY` of at least 32 characters. Keep keys out of YAML, git, comments,
    and artifacts. See [OAuth and credentials](docs/authentication.md).
 4. Set repository Variables `GROK_BASE_URL`, `GROK_MODEL`, and `AGY_MODEL`.
-   The qualified Cortex deployment uses `grok-4.6` and `gemini-3.1-pro-high`.
+   The qualified Cortex deployment uses `grok-4.6` and `gemini-3.8-flash-medium`.
+   Set `GROK_EFFORT=xhigh`, `GROK_CONTEXT_WINDOW=500000`,
+   `GEMINI_EFFORT=medium`, and `GEMINI_CONTEXT_WINDOW=1048576`.
+   Gemini's medium is its next-to-highest level (low/medium/high). Grok 4.6
+   supports xhigh but has a 500k ceiling; it cannot be configured to 1M.
    Your gateway/account must actually support your selected models.
 5. Set `AUTO_REVIEW_ENABLED=true` and `AUTO_REVIEW_PUBLISH=true`. The latter enables
    the durable summary that records budget reservations before inference. Use a
@@ -56,6 +60,26 @@ inference job narrows permissions and does not receive a GitHub token.
 [Architecture and trust boundaries](docs/architecture.md) ·
 [Operations and troubleshooting](docs/operations.md) ·
 [Design evidence and limitations](docs/design.md)
+
+## Context and effort
+
+The model window and input retrieval budget are separate. The collector can now
+assemble up to 4,000,000 serialized characters, including up to 2,500,000 related
+source characters, 100 related files and 300 API reads. Each reviewer receives its
+own bounded projection: 500,000 tokens for Grok and 1,048,576 for Gemini. Whole
+patch hunks and requested verification evidence are preserved; missing context is
+reported explicitly. A smaller Grok window does not cap Gemini's input.
+
+Input tokens are estimated from UTF-8 bytes divided by three, with ten percent of
+the configured window reserved for overhead/output (at least 16k). This is not an
+exact provider tokenizer and does not certify maximum-window accuracy. Provider
+context/truncation failures remain failures. No fabricated context-window parameter
+is sent to the API: model selection determines provider capacity, while the engine
+budgets what it sends. Effort is sent explicitly in each provider's supported form.
+
+The default per-PR accounting ceiling is 8,000,000 tokens so a large-context review
+and its verification can run. The independent hard limit remains eight reservations;
+small PRs use their actual context and never receive padding to fill a window.
 
 ## Local development
 

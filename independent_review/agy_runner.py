@@ -220,6 +220,8 @@ def stream_review(command, prompt, cwd, env, timeout, model):
 
 
 def run(backend, prompt):
+    from .core import check_context
+    settings = check_context(backend, prompt)
     binary = os.environ.get(backend["binary_env"], "")
     model = os.environ.get(backend["model_env"], "")
     state = os.environ.get(backend["state_env"], "")
@@ -264,6 +266,8 @@ def run(backend, prompt):
                        "--model", model, "--agent", AGENT,
                        "--add-dir", str(workspace), "--disable-slash-commands",
                        "--print-timeout", str(backend["timeout_seconds"]) + "s"]
+            if settings["effort"]:
+                command.extend(["--effort", settings["effort"]])
             env = child_environment()
             env["HOME"] = str(private_home)
             try:

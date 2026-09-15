@@ -48,7 +48,7 @@ jobs:
           persist-credentials: false
       - name: Collect trusted policy and reserve review
         id: prepare
-        uses: reed-yang/independent-pr-review@6431291de77f76e6c978552f73b2ec1d55a62080 # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@8dbc8c83f0b21307e6e4fcfd9737a74edad2f684 # engine pin; updated by scripts/pin_release.py
         with:
           phase: prepare
           config: ${{ inputs.config }}
@@ -61,8 +61,12 @@ jobs:
           REVIEW_PUBLISH: ${{ vars.AUTO_REVIEW_PUBLISH }}
           GROK_BASE_URL: ${{ vars.GROK_BASE_URL }}
           GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GROK_EFFORT: ${{ vars.GROK_EFFORT }}
+          GROK_CONTEXT_WINDOW: ${{ vars.GROK_CONTEXT_WINDOW }}
           GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL }}
           GEMINI_MODEL: ${{ vars.AGY_MODEL || vars.GEMINI_MODEL }}
+          GEMINI_EFFORT: ${{ vars.GEMINI_EFFORT }}
+          GEMINI_CONTEXT_WINDOW: ${{ vars.GEMINI_CONTEXT_WINDOW }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.prepare.outputs.run == 'true'
         with:
@@ -81,7 +85,7 @@ jobs:
     concurrency:
       group: agy-subscription-account
       cancel-in-progress: false
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions: {}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -89,16 +93,20 @@ jobs:
           name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/independent-review
       - name: Independent opinions and candidate verification
-        uses: reed-yang/independent-pr-review@6431291de77f76e6c978552f73b2ec1d55a62080 # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@8dbc8c83f0b21307e6e4fcfd9737a74edad2f684 # engine pin; updated by scripts/pin_release.py
         with:
           phase: review
           output: ${{ runner.temp }}/independent-review
         env:
           GROK_BASE_URL: ${{ vars.GROK_BASE_URL }}
           GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GROK_EFFORT: ${{ vars.GROK_EFFORT }}
+          GROK_CONTEXT_WINDOW: ${{ vars.GROK_CONTEXT_WINDOW }}
           GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
           GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL }}
           GEMINI_MODEL: ${{ vars.AGY_MODEL || vars.GEMINI_MODEL }}
+          GEMINI_EFFORT: ${{ vars.GEMINI_EFFORT }}
+          GEMINI_CONTEXT_WINDOW: ${{ vars.GEMINI_CONTEXT_WINDOW }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           AGY_OAUTH_JSON: ${{ secrets.AGY_OAUTH_JSON }}
       - name: Show normalized report
@@ -141,7 +149,7 @@ jobs:
           path: ${{ runner.temp }}/independent-review
         if: needs.review.result == 'success'
       - name: Update summary and verified inline findings
-        uses: reed-yang/independent-pr-review@6431291de77f76e6c978552f73b2ec1d55a62080 # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@8dbc8c83f0b21307e6e4fcfd9737a74edad2f684 # engine pin; updated by scripts/pin_release.py
         with:
           phase: ${{ needs.review.result == 'success' && 'publish' || 'fail' }}
           output: ${{ runner.temp }}/independent-review

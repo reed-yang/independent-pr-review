@@ -58,7 +58,8 @@ G1 credits. Google/account eligibility and quotas remain external dependencies.
 
 For a smoke check, call the pinned composite Action with `phase: auth-check`, on a
 fresh hosted runner in the protected Environment, passing only `AGY_OAUTH_JSON`
-and `GEMINI_MODEL`. Serialize it with `agy-subscription-account` like the review job.
+and `GEMINI_MODEL=gemini-3.8-flash-medium`, with `GEMINI_EFFORT=medium` and
+`GEMINI_CONTEXT_WINDOW=1048576`. Serialize it with `agy-subscription-account` like the review job.
 
 ## Optional Gemini gateway
 

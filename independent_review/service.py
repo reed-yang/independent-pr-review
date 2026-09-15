@@ -6,7 +6,7 @@ import json
 import time
 
 from .anchors import bind
-from .core import HARNESSES, ReviewError, digest, run_slot
+from .core import HARNESSES, ReviewError, digest, run_slot, estimate_tokens, runtime_settings
 
 
 def usage_tokens(usage, estimate):
@@ -83,17 +83,59 @@ def parse_decisions(raw, packet, candidates):
     return valid
 
 
+def fit_packet(packet, backend, candidates=None):
+    """Budget each family's input independently, preserving whole diff hunks."""
+    from .core import prompt_for
+    value = copy.deepcopy(packet)
+    settings = runtime_settings(backend)
+    protected = {candidate['path'] for candidate in (candidates or [])}
+    omitted = []
+    def omit(path, reason):
+        item = {'path': path, 'reason': reason}
+        omitted.append(item)
+        value['omitted'].append(item)
+    def prompt():
+        return verification_prompt(value, candidates) if candidates is not None else prompt_for(value)
+    while estimate_tokens(prompt()) > settings['input_budget_tokens']:
+        optional = next((entry for entry in reversed(value['context']) if entry['path'] not in protected), None)
+        if optional:
+            value['context'].remove(optional)
+            omit(optional['path'], 'lane_context_budget')
+            continue
+        source = next(((entry, key) for key in ('base_text', 'head_text')
+                       for entry in sorted(value['files'], key=lambda entry: len(entry.get(key) or ''), reverse=True)
+                       if entry.get(key) and (key == 'base_text' or entry['path'] not in protected)), None)
+        if source:
+            entry, key = source
+            entry[key] = None
+            omit(entry['path'], key + '_lane_budget')
+            continue
+        optional = next((entry for entry in reversed(value['files']) if entry['path'] not in protected), None)
+        if optional:
+            value['files'].remove(optional)
+            omit(optional['path'], 'diff_lane_budget')
+            continue
+        raise ReviewError('required_evidence_exceeds_lane_context')
+    # Include omission metadata in the final check; it is evidence too.
+    if estimate_tokens(prompt()) > settings['input_budget_tokens']:
+        raise ReviewError('packet_metadata_exceeds_lane_context')
+    return value, {**settings, 'estimated_prompt_tokens': estimate_tokens(prompt()),
+                   'omitted': omitted, 'files': len(value['files']), 'context_files': len(value['context'])}
+
+
 def verify(slot, config, packet, candidates, runners):
     backend_id = slot['backends'][0]
     backend = config['backends'][backend_id]
-    prompt = verification_prompt(packet, candidates)
-    estimate = len(prompt.encode()) // 3 + 6500
+    estimate = 0
     start = time.monotonic()
     try:
+        packet, coverage = fit_packet(packet, backend, candidates)
+        prompt = verification_prompt(packet, candidates)
+        estimate = estimate_tokens(prompt) + 6500
         raw, model, usage = runners[backend['harness']](backend, prompt)
         decisions = parse_decisions(raw, packet, candidates)
         return {'slot': slot['id'], 'status': 'completed', 'model': model, 'decisions': decisions,
-                'usage': usage, 'accounted_tokens': usage_tokens(usage, estimate),
+                'usage': usage, 'accounted_tokens': usage_tokens(usage, estimate), 'input_context': coverage,
                 'elapsed_seconds': round(time.monotonic() - start, 2)}
     except ReviewError as exc:
         return {'slot': slot['id'], 'status': 'failed', 'error': str(exc), 'decisions': {}, 'accounted_tokens': estimate}
@@ -105,6 +147,7 @@ def run(bundle, runners=None):
     slots = config['backends']['slots']
     reviews = []
     lane_packets = {}
+    lane_coverage = {}
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {}
         for slot in slots:
@@ -116,6 +159,8 @@ def run(bundle, runners=None):
             data = copy.deepcopy(packet)
             if lane['paths'] is not None:
                 data['files'] = [entry for entry in packet['files'] if entry['path'] in lane['paths'] or entry.get('previous_filename') in lane['paths']]
+            backend = config['backends']['backends'][slot['backends'][0]]
+            data, lane_coverage[slot['id']] = fit_packet(data, backend)
             if not data['files']:
                 reviews.append({'slot': slot['id'], 'status': 'skipped', 'findings': [], 'scope': 'no_reviewable_changed_text'})
                 continue
@@ -125,6 +170,7 @@ def run(bundle, runners=None):
             if slot['id'] in futures:
                 review = futures[slot['id']].result()
                 review['scope'] = packet['lanes'][slot['id']]['reason']
+                review['input_context'] = lane_coverage[slot['id']]
                 reviews.append(review)
     reviews.sort(key=lambda value: next(i for i, slot in enumerate(slots) if slot['id'] == value['slot']))
     accounted = sum(usage_tokens(review.get('usage'), len(json.dumps(lane_packets[review['slot']]).encode()) // 3 + 6500)
