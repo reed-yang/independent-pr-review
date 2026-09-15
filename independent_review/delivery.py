@@ -113,12 +113,13 @@ def resolve_fixed(state, default_branch, api=github, gql=graphql):
     for _ in range(20):
         data = gql('''query($owner:String!,$name:String!,$number:Int!,$cursor:String){
           repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){
-            pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{fullDatabaseId author{login}}}}
+            pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{fullDatabaseId author{login __typename}}}}
           }}}}''', {'owner': owner, 'name': name, 'number': state['pr_number'], 'cursor': cursor})
         threads = data['repository']['pullRequest']['reviewThreads']
         for thread in threads['nodes']:
             comments = thread['comments']['nodes']
-            if not comments or (comments[0].get('author') or {}).get('login') != BOT:
+            author = (comments[0].get('author') or {}) if comments else {}
+            if author.get('__typename') != 'Bot' or author.get('login') != BOT.removesuffix('[bot]'):
                 continue
             identifier = str(comments[0].get('fullDatabaseId', ''))
             if not identifier.isdigit() or int(identifier) not in targets:

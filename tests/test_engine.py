@@ -356,7 +356,7 @@ class CommandAndDeliveryTests(unittest.TestCase):
                 mutations.append(variables['id'])
                 return {}
             return {'repository': {'pullRequest': {'reviewThreads': {'pageInfo': {'hasNextPage': False}, 'nodes': [
-                {'id': 'own', 'isResolved': False, 'comments': {'nodes': [{'fullDatabaseId': '9000000031', 'author': {'login': state.BOT}}]}},
+                {'id': 'own', 'isResolved': False, 'comments': {'nodes': [{'fullDatabaseId': '9000000031', 'author': {'login': 'github-actions', '__typename': 'Bot'}}]}},
                 {'id': 'human', 'isResolved': False, 'comments': {'nodes': [{'fullDatabaseId': '32', 'author': None}]}}
             ]}}}}
         delivery.resolve_fixed(value, 'main', lambda *args: pr(), gql)
