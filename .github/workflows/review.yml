@@ -1,0 +1,142 @@
+name: Reusable independent PR review
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: PR number for workflow_dispatch
+        type: string
+        default: ''
+      mode:
+        type: string
+        default: review
+      config:
+        type: string
+        default: .github/review.json
+      environment:
+        description: Consumer environment restricted to its default branch
+        type: string
+        default: pr-review
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      run: ${{ steps.prepare.outputs.run }}
+      publish: ${{ steps.prepare.outputs.publish }}
+      pr_number: ${{ steps.prepare.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Collect trusted policy and reserve review
+        id: prepare
+        uses: reed-yang/independent-pr-review@a098e0ac2342228e22d6a8d32620016a94d8ebb4 # engine pin; updated by scripts/pin_release.py
+        with:
+          phase: prepare
+          config: ${{ inputs.config }}
+          output: ${{ runner.temp }}/independent-review
+          mode: ${{ inputs.mode }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_STATE_KEY: ${{ secrets.REVIEW_STATE_KEY }}
+          REVIEW_PR: ${{ inputs.pr_number }}
+          REVIEW_PUBLISH: ${{ vars.AUTO_REVIEW_PUBLISH }}
+          GROK_BASE_URL: ${{ vars.GROK_BASE_URL }}
+          GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL }}
+          GEMINI_MODEL: ${{ vars.AGY_MODEL || vars.GEMINI_MODEL }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.prepare.outputs.run == 'true'
+        with:
+          name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/independent-review/bundle.json
+          if-no-files-found: error
+          retention-days: 1
+
+  review:
+    needs: prepare
+    if: needs.prepare.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    # Repository-scoped: consumers sharing one Google account need separate
+    # accounts or an external dispatcher for cross-repository serialization.
+    concurrency:
+      group: agy-subscription-account
+      cancel-in-progress: false
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/independent-review
+      - name: Independent opinions and candidate verification
+        uses: reed-yang/independent-pr-review@a098e0ac2342228e22d6a8d32620016a94d8ebb4 # engine pin; updated by scripts/pin_release.py
+        with:
+          phase: review
+          output: ${{ runner.temp }}/independent-review
+        env:
+          GROK_BASE_URL: ${{ vars.GROK_BASE_URL }}
+          GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+          GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL }}
+          GEMINI_MODEL: ${{ vars.AGY_MODEL || vars.GEMINI_MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AGY_OAUTH_JSON: ${{ secrets.AGY_OAUTH_JSON }}
+      - name: Show normalized report
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib
+          report = pathlib.Path(os.environ['RUNNER_TEMP']) / 'independent-review/result.md'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(report.read_text() if report.exists() else 'Review did not produce a completed report.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: review-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/independent-review/result.json
+            ${{ runner.temp }}/independent-review/result.md
+          if-no-files-found: warn
+          retention-days: 3
+
+  publish:
+    needs: [prepare, review]
+    if: always() && !cancelled() && needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/independent-review
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: review-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/independent-review
+        if: needs.review.result == 'success'
+      - name: Update summary and verified inline findings
+        uses: reed-yang/independent-pr-review@a098e0ac2342228e22d6a8d32620016a94d8ebb4 # engine pin; updated by scripts/pin_release.py
+        with:
+          phase: ${{ needs.review.result == 'success' && 'publish' || 'fail' }}
+          output: ${{ runner.temp }}/independent-review
+          mode: ${{ inputs.mode }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_STATE_KEY: ${{ secrets.REVIEW_STATE_KEY }}
+          REVIEW_PR: ${{ needs.prepare.outputs.pr_number }}
