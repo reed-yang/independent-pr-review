@@ -131,7 +131,10 @@ def accept(state, result, run_id):
         value['findings'][finding['finding_id']] = {**old, **finding, 'last_checked_sha': result['head_sha']}
     value['status'] = result['status']
     value['head_sha'], value['base_sha'] = result['head_sha'], result['base_sha']
-    value['last_reviews'] = [{key: lane.get(key) for key in ('slot', 'status', 'model', 'scope', 'error', 'effort', 'context_window_tokens')} for lane in result['reviews']]
+    value['last_reviews'] = [{**{key: lane.get(key) for key in
+                               ('slot', 'status', 'model', 'scope', 'error', 'effort', 'context_window_tokens', 'elapsed_seconds')},
+                              'errors': [item['error'] for item in lane.get('attempts', []) if item.get('error')],
+                              'rejected_count': len(lane.get('rejected_findings', []))} for lane in result['reviews']]
     value['coverage'] = result['coverage']
     value['omitted_count'] = len(result['omitted'])
     value['reservation'] = None

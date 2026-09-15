@@ -99,6 +99,12 @@ through `reasoning_effort` for Grok, `--effort` and the pinned variant slug for 
 and `thinkingConfig.thinkingLevel` for the optional Gemini HTTP backend.
 
 Each family advances its baseline only on completed generation and verification.
+Individual invalid generation candidates are recorded with bounded, redacted quote
+diagnostics and excluded; valid candidates from the same lane can still be verified.
+Literal matching also checks separately reconstructed old/new sides of each diff
+hunk, without fuzzy whitespace matching or joining across omitted source. A lane
+with rejected candidates remains partial. A provider that failed during generation
+is not invoked again for verification in the same run.
 Same base/head/config/engine/model reuses a successful result. New heads use a
 bounded ancestor comparison; force pushes, rebases, changed base/config, missing
 history and incomplete comparisons explicitly fall back to full PR review. A
@@ -114,3 +120,9 @@ Code-only `bundle.json` crosses jobs in an artifact retained for one day. Normal
 `result.json` and `result.md` are retained for three days. No native HOME, OAuth file,
 CLI stdout/stderr, conversations or credential logs are uploaded or cached. Treat
 code packets as repository source with the repository's artifact access controls.
+
+Grok uses bounded SSE transport with separate connect, idle and total deadlines.
+Only final content, selected usage counts and redacted timing/event metrics survive;
+reasoning deltas, raw error bodies and headers are not retained. A terminal stream
+marker and normal finish are required. Native installation overlaps the Grok call
+and uses the existing pinned, checksum-verified official archive.

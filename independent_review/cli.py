@@ -115,8 +115,15 @@ def prepare(args):
         verify_finding = matches[0]
         if prior['findings'][verify_finding]['status'] not in ('open', 'uncertain'):
             raise ReviewError('finding_already_resolved')
-    packet = collect(repo, number, pr, config, prior, force_full=command == 'full' or command.startswith('verify:'))
-    if all(lane['paths'] == [] for lane in packet['lanes'].values()):
+    force_full = command == 'full' or command.startswith('verify:')
+    # A successful identical snapshot needs neither source downloads nor inference.
+    same_snapshot = not force_full and all(
+        prior['lanes'].get(slot['id'], {}).get('head_sha') == pr['head']['sha'] and
+        prior['lanes'][slot['id']].get('base_sha') == pr['base']['sha'] and
+        prior['lanes'][slot['id']].get('config_id') == config['config_id']
+        for slot in config['backends']['slots'])
+    packet = None if same_snapshot else collect(repo, number, pr, config, prior, force_full=force_full)
+    if same_snapshot or all(lane['paths'] == [] for lane in packet['lanes'].values()):
         prior = state.reuse(prior, run_url)
         if publish:
             delivery.publish_inline(prior, config, default_branch)

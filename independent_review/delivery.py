@@ -43,8 +43,14 @@ def summary(state, limits):
             name += ' · ' + lane['effort']
         if lane.get('context_window_tokens'):
             name += ' · ' + format(lane['context_window_tokens'], ',') + ' context'
+        status = (lane.get('status') or 'pending').capitalize()
+        errors = list(lane.get('errors', []))
+        if lane.get('rejected_count'):
+            errors.append(str(lane['rejected_count']) + ' rejected candidate(s)')
+        if errors:
+            status += ': ' + ', '.join(errors)
         scope = scopes.get(lane.get('scope'), (lane.get('scope') or 'Pending').replace('_', ' '))
-        cells = (name, (lane.get('status') or 'pending').capitalize(), scope)
+        cells = (name, status, scope)
         lines.append('| ' + ' | '.join(plain(cell).replace('|', '／') for cell in cells) + ' |')
     lines.extend(['', '<details>', '<summary>Scope, budget and controls</summary>', '',
                   'The reviewers received bounded diff and related-source context. Repository code was not executed; no tests were run by this harness.',
@@ -67,6 +73,15 @@ def report(result):
              'This report contains independent opinions and verification decisions. Raw candidates are not published as confirmed bugs.', '']
     for lane in result['reviews']:
         lines.extend([f"## {plain(lane['slot'])}: {plain(lane['status'])}", '', plain(lane.get('summary', 'No completed opinion.')), ''])
+        if lane.get('elapsed_seconds') is not None:
+            lines.append(f"- Elapsed: {lane['elapsed_seconds']} seconds.")
+        for attempt in lane.get('attempts', []):
+            if attempt.get('error'):
+                lines.append(f"- Failure: {plain(attempt['error'])}; stage: {plain(attempt.get('stage', 'unknown'))}; elapsed: {attempt.get('elapsed_seconds', 'unknown')} seconds.")
+                if attempt.get('diagnostics'):
+                    lines.append('- Transport diagnostics: ' + plain(json.dumps(attempt['diagnostics'], sort_keys=True)))
+        for rejected in lane.get('rejected_findings', []):
+            lines.append(f"- Rejected candidate {rejected['index'] + 1}: {plain(rejected['error'])}; path: {plain(rejected.get('path') or 'unrecognized')}. Redacted evidence diagnostics are in result.json.")
         for finding in lane.get('findings', []):
             lines.extend([f"- {finding['severity']} `{plain(finding['path'])}`: {plain(finding['title'])}",
                           f"  {plain(finding['body'])}"])
