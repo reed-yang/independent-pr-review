@@ -5,8 +5,8 @@
 Events and comments run trusted default-branch workflow code. Commands are exact,
 single-line forms; the harness checks current collaborator permission rather than
 trusting author-association labels. It ignores bots, issue-only comments and command
-suffixes. `/review verify <id>` validates a unique known finding prefix and requests
-a full review including unresolved findings; it is not a cheaper single-issue run.
+suffixes. `/review verify <id>` validates a unique unresolved finding prefix and requests
+a full review, prioritizing that finding within the verification cap; it is not a cheaper single-issue run.
 
 `/review` reuses an identical successful snapshot. `/review full` forces new opinions
 but respects all budgets. `/review pause` prevents future reservations; a model

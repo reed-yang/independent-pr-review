@@ -106,11 +106,15 @@ def prepare(args):
     if prior['paused']:
         print('Review skipped: paused.')
         return
+    verify_finding = None
     if command.startswith('verify:'):
         prefix = command.split(':')[1]
         matches = [fid for fid in prior['findings'] if fid.startswith(prefix)]
         if len(matches) != 1:
             raise ReviewError('unknown_or_ambiguous_finding_id')
+        verify_finding = matches[0]
+        if prior['findings'][verify_finding]['status'] not in ('open', 'uncertain'):
+            raise ReviewError('finding_already_resolved')
     packet = collect(repo, number, pr, config, prior, force_full=command == 'full' or command.startswith('verify:'))
     if all(lane['paths'] == [] for lane in packet['lanes'].values()):
         prior = state.reuse(prior, run_url)
@@ -127,7 +131,7 @@ def prepare(args):
             delivery.write_summary(prior, comment_id, key, config['limits'])
         print('No reviewable text; no model calls were reserved.')
         return
-    bundle = {'packet': packet, 'config': config, 'state': prior, 'default_branch': default_branch}
+    bundle = {'packet': packet, 'config': config, 'state': prior, 'default_branch': default_branch, 'verify_finding': verify_finding}
     if command == 'dry-run':
         print(json.dumps({'status': 'dry_run', 'files': len(packet['files']), 'context_files': len(packet['context']),
                           'omitted': len(packet['omitted']), 'packet_id': packet['packet_id'], 'lanes': packet['lanes']}))

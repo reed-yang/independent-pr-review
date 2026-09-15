@@ -159,7 +159,7 @@ def run(bundle, runners=None):
             item['anchor'] = bind(item, entries[item['path']])['anchor'] if item['path'] in entries else None
             candidates[fid] = item
     limit = config['limits']['max_verification_candidates']
-    ordered = sorted(candidates.values(), key=lambda item: (not item.get('previous'), item['severity'], item['finding_id']))
+    ordered = sorted(candidates.values(), key=lambda item: (item['finding_id'] != bundle.get('verify_finding'), not item.get('previous'), item['severity'], item['finding_id']))
     chosen, overflow = ordered[:limit], ordered[limit:]
     batches = {slot['id']: [] for slot in slots}
     for candidate in chosen:

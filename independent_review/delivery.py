@@ -25,6 +25,8 @@ def summary(state, limits):
         lines.append(f"- **{item['severity']}** `{plain(item['path'])}` — {plain(item['title'][:180])} (`{item['finding_id'][:8]}`)")
     if not active and state['status'] == 'completed':
         lines.append('No verified actionable findings in the reviewed scope. This is not an approval or a full-repository audit.')
+    elif state['status'] == 'ineligible':
+        lines.append('This PR is no longer eligible for automatic review. Previous review outcomes are retained below.')
     elif state['status'] not in ('completed', 'ready'):
         lines.append('Review coverage is incomplete or work is pending. Do not interpret this status as a clean review.')
     lines.extend(['', '| Reviewer | Status | Scope |', '| --- | --- | --- |'])
@@ -111,14 +113,17 @@ def resolve_fixed(state, default_branch, api=github, gql=graphql):
     for _ in range(20):
         data = gql('''query($owner:String!,$name:String!,$number:Int!,$cursor:String){
           repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){
-            pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{databaseId author{login}}}}
+            pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{fullDatabaseId author{login}}}}
           }}}}''', {'owner': owner, 'name': name, 'number': state['pr_number'], 'cursor': cursor})
         threads = data['repository']['pullRequest']['reviewThreads']
         for thread in threads['nodes']:
             comments = thread['comments']['nodes']
-            if not comments or comments[0]['author']['login'] != BOT or comments[0]['databaseId'] not in targets:
+            if not comments or (comments[0].get('author') or {}).get('login') != BOT:
                 continue
-            item = targets.pop(comments[0]['databaseId'])
+            identifier = str(comments[0].get('fullDatabaseId', ''))
+            if not identifier.isdigit() or int(identifier) not in targets:
+                continue
+            item = targets.pop(int(identifier))
             if not thread['isResolved']:
                 current_pr(state, default_branch, api)
                 gql('mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}', {'id': thread['id']})

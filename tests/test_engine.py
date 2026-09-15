@@ -268,6 +268,24 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual([item['status'] for item in result['reviews']], ['reused', 'reused'])
         self.assertEqual(result['accounted_tokens'], 0)
 
+    def test_requested_finding_is_not_starved_by_the_verification_cap(self):
+        data = bundle()
+        data['config']['limits']['max_verification_candidates'] = 1
+        first, requested = 'a' * 24, 'z' * 24
+        for fid in (first, requested):
+            data['state']['findings'][fid] = {**candidate(), 'finding_id': fid, 'status': 'open', 'sources': ['Grok']}
+        data['verify_finding'] = requested
+        seen = []
+        def runner(backend, prompt):
+            if prompt.startswith('Independently challenge'):
+                payload = json.loads(prompt[prompt.index('{"packet":'):])
+                seen.extend(item['finding_id'] for item in payload['candidates'])
+                return json.dumps({'decisions': [{'finding_id': item['finding_id'], 'status': 'uncertain', 'reason': 'Missing callers.'}
+                                                for item in payload['candidates']]}), 'model', {}
+            return answer(), 'model', {}
+        service.run(data, {name: runner for name in core.HARNESSES})
+        self.assertEqual(seen, [requested])
+
     def test_fixed_requires_current_head_evidence_not_missing_old_text(self):
         item = {**candidate(), 'previous': True}
         decision = {'finding_id': item['finding_id'], 'status': 'fixed', 'reason': 'Changed.', 'evidence_path': 'src/a.py', 'evidence': 'return None'}
@@ -329,16 +347,17 @@ class CommandAndDeliveryTests(unittest.TestCase):
         self.assertEqual(item['comment_id'], 31)
 
     def test_only_owned_verified_fixed_threads_are_resolved(self):
-        item = {**candidate(), 'status': 'fixed', 'comment_id': 31}
+        item = {**candidate(), 'status': 'fixed', 'comment_id': 9000000031}
         value = {**state.initial(REPO, 7), 'head_sha': HEAD, 'base_sha': BASE, 'findings': {item['finding_id']: item}}
         mutations = []
         def gql(query, variables):
+            self.assertNotIn('databaseId', query)
             if query.startswith('mutation'):
                 mutations.append(variables['id'])
                 return {}
             return {'repository': {'pullRequest': {'reviewThreads': {'pageInfo': {'hasNextPage': False}, 'nodes': [
-                {'id': 'own', 'isResolved': False, 'comments': {'nodes': [{'databaseId': 31, 'author': {'login': state.BOT}}]}},
-                {'id': 'human', 'isResolved': False, 'comments': {'nodes': [{'databaseId': 32, 'author': {'login': 'maintainer'}}]}}
+                {'id': 'own', 'isResolved': False, 'comments': {'nodes': [{'fullDatabaseId': '9000000031', 'author': {'login': state.BOT}}]}},
+                {'id': 'human', 'isResolved': False, 'comments': {'nodes': [{'fullDatabaseId': '32', 'author': None}]}}
             ]}}}}
         delivery.resolve_fixed(value, 'main', lambda *args: pr(), gql)
         self.assertEqual(mutations, ['own'])
