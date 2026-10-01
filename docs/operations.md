@@ -88,6 +88,23 @@ never advance the successful baseline or become a clean cached opinion.
 4. Consumers update their workflow to B in a reviewed PR. They can roll back by
    restoring the prior immutable SHA; mutable tags are not used for execution.
 
+The `Official agy release watch` workflow runs daily and on dispatch from the default
+branch. `scripts/agy_release.py check` compares the pin with Google's linux_amd64 and
+darwin_arm64 update manifests. For a newer version, `update` downloads both archives,
+verifies their SHA-512 and statically checks that the linux binary still sets the
+qualified 64000-token `MaxTokensPerUserInputStep`; a miss fails with
+`native_step_cap_unqualified` and leaves the pin for human qualification. Same-version
+manifests with different artifacts, or older manifests, also fail for human review.
+After the provider-free checks pass, the job creates or updates branch
+`chore/agy-<version>` and its PR, leaving an existing branch's commits unchanged; a
+closed PR for that version is respected until reopened manually. Allow
+GitHub Actions to create pull requests in the repository settings. PRs created with
+`GITHUB_TOKEN` trigger no other workflows, so the PR body records this job's evidence;
+dispatch `Harness checks` on the branch when CI on its head is needed. The tracking
+flow is: watch PR, review (agy changelog, runner compatibility), merge and engine
+release (steps 1-3), then consumer pin update (step 4). Dependabot proposes external
+Action SHA updates weekly; the engine self-pin is excluded.
+
 Engine CI has no provider Secrets. Consumer runs validate actual gateway/OAuth
 access. Protect release tags and default-branch workflow/config changes according
 to the collaboration model of each project. Do not install the review as a required
