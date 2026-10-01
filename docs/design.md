@@ -49,3 +49,10 @@ a full-window benchmark:
   and [reasoning configuration](https://docs.x.ai/developers/model-capabilities/text/reasoning):
   500,000 context tokens and explicit xhigh support. A larger number in client
   configuration cannot increase that provider limit.
+
+The pinned agy CLI's default conversational cascade sets `MaxTokensPerUserInputStep`
+to 64,000 tokens, estimated as UTF-8 bytes/3 (static check, recorded in
+`agy-release.json`). A larger step silently keeps a prefix plus a truncation marker:
+Cortex PR #13's 505,018-byte prompt was cut near 192,000 bytes, yet the Gemini lane
+completed and became a successful baseline. The engine therefore budgets native input
+below that cap and requires each reply to echo a per-call end-of-input nonce.

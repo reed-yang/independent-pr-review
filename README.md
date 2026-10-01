@@ -71,14 +71,20 @@ inference job narrows permissions and does not receive a GitHub token.
 The model window and input retrieval budget are separate. The collector can now
 assemble up to 4,000,000 serialized characters, including up to 2,500,000 related
 source characters, 100 related files and 300 API reads. Each reviewer receives its
-own bounded projection: 500,000 tokens for Grok and 1,048,576 for Gemini. Whole
+own bounded projection: 500,000 tokens for Grok and 1,048,576 for Gemini. Native
+agy keeps only a prefix of a user input step above 64,000 estimated tokens, so the
+native Gemini lane's input is capped at 60,000 (4,000 reserved for agy's wrapper)
+while its model window stays 1,048,576; the report states when this cap binds. Whole
 patch hunks and requested verification evidence are preserved; missing context is
 reported explicitly. A smaller Grok window does not cap Gemini's input.
 
 Input tokens are estimated from UTF-8 bytes divided by three, with ten percent of
 the configured window reserved for overhead/output (at least 16k). This is not an
 exact provider tokenizer and does not certify maximum-window accuracy. Provider
-context/truncation failures remain failures. No fabricated context-window parameter
+context/truncation failures remain failures. Every review and verification input
+ends with a fresh random `END_OF_INPUT_NONCE` line that the reply must copy into
+`input_end_nonce`; a missing or different value marks that call partial, so a
+silently truncated input never advances a baseline. No fabricated context-window parameter
 is sent to the API: model selection determines provider capacity, while the engine
 budgets what it sends. Effort is sent explicitly in each provider's supported form.
 

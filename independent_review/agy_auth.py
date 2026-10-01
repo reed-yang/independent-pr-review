@@ -49,6 +49,8 @@ def sync(source, repo):
 
 def check():
     backend = json.loads(Path(__file__).with_name("backends.json").read_text())["backends"]["gemini-ai-pro"]
+    # This fixed credential check is not a packet review; it stays outside the
+    # end-of-input nonce contract that every review and verification call uses.
     raw, model, usage = run(backend, 'Native OAuth smoke test. Return only JSON: '
                             '{"summary":"OAuth smoke passed","limitations":[],"findings":[]}.')
     result = parse_findings(raw, {"files": []})
