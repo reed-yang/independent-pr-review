@@ -4,6 +4,7 @@ import http.client
 import json
 import socket
 import ssl
+import threading
 import time
 from urllib.parse import urlsplit
 
@@ -166,6 +167,8 @@ def completion(url, token, payload, backend):
     stage = 'connect'
     conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443,
                                        timeout=min(connect_timeout, timeout), context=ssl.create_default_context())
+    deadline_timer = None
+    deadline_expired = threading.Event()
 
     def remaining():
         value = deadline - time.monotonic()
@@ -188,6 +191,16 @@ def completion(url, token, payload, backend):
     try:
         conn.connect()
         sock = conn.sock
+        def interrupt():
+            deadline_expired.set()
+            try:
+                # http.client can perform multiple reads within one blocking call.
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        deadline_timer = threading.Timer(remaining(), interrupt)
+        deadline_timer.daemon = True
+        deadline_timer.start()
         metrics['connect_seconds'] = round(time.monotonic() - start, 2)
         stage = 'request'
         read_timeout(sock)
@@ -200,6 +213,7 @@ def completion(url, token, payload, backend):
         stage = 'headers'
         read_timeout(sock)
         with conn.getresponse() as response:
+            remaining()
             metrics['headers_seconds'] = round(time.monotonic() - start, 2)
             metrics['http_status'] = response.status
             if 300 <= response.status < 400:
@@ -263,17 +277,19 @@ def completion(url, token, payload, backend):
             elif not decoder.done:
                 raise ReviewError('provider_stream_incomplete')
             text, model, usage = decoder.result(payload['model'])
+            remaining()
             metrics.update(decoder.counts)
             metrics.update(decoder.terminal)
             metrics['elapsed_seconds'] = round(time.monotonic() - start, 2)
             return text, model, {**usage, 'transport': metrics}
     except (TimeoutError, socket.gaierror, ssl.SSLError, OSError, http.client.HTTPException, UnicodeError, ReviewError) as exc:
-        if isinstance(exc, ReviewError):
+        if deadline_expired.is_set() or time.monotonic() >= deadline:
+            code = 'provider_deadline_exceeded'
+        elif isinstance(exc, ReviewError):
             code = str(exc)
         elif isinstance(exc, TimeoutError):
-            code = 'provider_deadline_exceeded' if time.monotonic() >= deadline else (
-                'provider_progress_timeout' if last_progress is not None and time.monotonic() - last_progress >= progress_timeout else
-                'provider_idle_timeout' if stage == 'read' else 'provider_' + stage + '_timeout')
+            code = ('provider_progress_timeout' if last_progress is not None and time.monotonic() - last_progress >= progress_timeout else
+                    'provider_idle_timeout' if stage == 'read' else 'provider_' + stage + '_timeout')
         elif isinstance(exc, socket.gaierror):
             code = 'provider_dns_error'
         elif isinstance(exc, ssl.SSLError):
@@ -289,4 +305,7 @@ def completion(url, token, payload, backend):
         raise ReviewError(code, {**metrics, **decoder.counts, **decoder.terminal, 'stage': stage,
                                 'elapsed_seconds': round(time.monotonic() - start, 2)}) from None
     finally:
+        if deadline_timer is not None:
+            deadline_timer.cancel()
+            deadline_timer.join()
         conn.close()
