@@ -97,8 +97,11 @@ resolved values in the configuration identity; a change invalidates old cache re
 Generation and verification project the shared packet separately for that provider,
 preserving whole diffs and requested verification evidence. Optional source is
 trimmed first; an irreducible oversized verification packet fails without calling a
-model. Reports retain lane-specific omissions and estimated prompt sizes; compact
-signed cache entries keep omission counts instead of unbounded path lists.
+model. Native agy input is also capped at the per-user-input-step limit recorded in
+`agy-release.json` (64,000 estimated tokens) minus a 4,000-token wrapper reserve;
+the configured model window is still reported as the window. Reports retain
+lane-specific omissions and estimated prompt sizes; compact signed cache entries
+keep omission counts instead of unbounded path lists.
 
 The larger collector ceiling is 4M characters, not 4M tokens. Estimates use UTF-8
 bytes/3 with at least a ten-percent window reserve, not a provider tokenizer.
@@ -110,6 +113,11 @@ through `reasoning_effort` for Grok, `--effort` and the pinned variant slug for 
 and `thinkingConfig.thinkingLevel` for the optional Gemini HTTP backend.
 
 Each family advances its baseline only on completed generation and verification.
+Every model call's input ends with a fresh random `END_OF_INPUT_NONCE` line after all
+JSON; the nonce is not part of packet identity. A reply whose `input_end_nonce` is
+missing or different makes that generation lane or verification batch partial with
+a redacted `input_end_nonce_missing`/`input_end_nonce_mismatch` reason. Evidence-checked
+candidates and valid sibling decisions are kept, as for rejected quotes below.
 Individual invalid generation candidates are recorded with bounded, redacted quote
 diagnostics and excluded; valid candidates from the same lane can still be verified.
 Literal matching also checks separately reconstructed old/new sides of each diff

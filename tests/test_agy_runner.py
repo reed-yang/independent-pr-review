@@ -231,6 +231,11 @@ class AgyRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(agy_runner.AgyError, "invalid_review_json"):
             agy_runner.result_payload(result, b"")
 
+    def test_native_payload_keeps_the_end_of_input_nonce_for_validation(self):
+        output = {"summary": "Reviewed", "limitations": [], "findings": [], "input_end_nonce": "0123456789abcdef"}
+        raw, _ = agy_runner.result_payload(self.result(structured_output=output), b"")
+        self.assertEqual(json.loads(raw)["input_end_nonce"], "0123456789abcdef")
+
     def test_non_string_cli_responses_are_redacted_failures(self):
         for response in [None, [], {}, 7]:
             result = self.result()
