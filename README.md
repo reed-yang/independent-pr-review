@@ -73,7 +73,10 @@ assemble up to 4,000,000 serialized characters, including up to 2,500,000 relate
 source characters, 100 related files and 300 API reads. Each reviewer receives its
 own bounded projection: 500,000 tokens for Grok and 1,048,576 for Gemini. Whole
 patch hunks and requested verification evidence are preserved; missing context is
-reported explicitly. A smaller Grok window does not cap Gemini's input.
+reported explicitly. A smaller Grok window does not cap Gemini's input. Changed files
+are read largest change first, followed by previous-finding files and configured
+includes, base versions, and then heuristic neighbors. A single file is bounded by the
+remaining budget, up to 1,000,000 characters.
 
 Input tokens are estimated from UTF-8 bytes divided by three, with ten percent of
 the configured window reserved for overhead/output (at least 16k). This is not an

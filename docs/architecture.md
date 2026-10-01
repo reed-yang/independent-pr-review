@@ -50,10 +50,18 @@ rechecks minimize, but cannot eliminate, a push racing an API request.
 ## Context and verification
 
 The collector reads paginated PR file diffs, immutable head files, merge-base files,
-and a bounded source tree through GitHub APIs. It prioritizes configured context,
-imports, related tests and sibling modules. This is deterministic retrieval, not a
-complete semantic index or arbitrary repository browsing. Missing/truncated files,
-API limits and packet limits are explicit. Source is data and never executed.
+and a bounded source tree through GitHub APIs. Source is admitted in this order:
+current versions of changed files, largest change first (diffs keep GitHub's order);
+files of unresolved previous findings, then configured includes; merge-base versions;
+then imports, related tests and sibling modules. Each file is bounded by the remaining
+budget, with a 1,000,000-character ceiling near the contents API limit. This is
+deterministic retrieval, not a complete semantic index or arbitrary repository
+browsing. Missing/truncated files, API limits and packet limits are explicit: each
+unadmitted requested file is recorded with a reason (`context_budget`,
+`context_unavailable`, `context_api_budget` or `context_file_limit`); other related
+files are listed up to 20, then one aggregate record. Records share the packet budget;
+if they no longer fit, one `omission_metadata_exceeds_budget` marker replaces the rest.
+Source is data and never executed.
 
 Initial opinions are independent. Up to ten combined candidates or previous issues
 receive one fresh verification batch per needed family (at most four model calls
