@@ -1,0 +1,9 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # The engine self-pin follows scripts/pin_release.py and the release procedure.
+      - dependency-name: reed-yang/independent-pr-review

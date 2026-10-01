@@ -1,0 +1,4 @@
+self-hosted-runner:
+  # GitHub-hosted and GA since 2026-09-17; actionlint 1.7.12 does not list it yet.
+  labels:
+    - ubuntu-26.04

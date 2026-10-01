@@ -109,6 +109,7 @@ Engine CI has no provider Secrets. Consumer runs validate actual gateway/OAuth
 access. Protect release tags and default-branch workflow/config changes according
 to the collaboration model of each project. Do not install the review as a required
 merge check until its quota, reliability and noise are understood for that project.
+Engine CI runs on both `ubuntu-latest` and `ubuntu-26.04` during the runner migration.
 
 
 The default Grok adapter uses native `/responses` with `reasoning.effort`, rather
