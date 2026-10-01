@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -192,6 +193,7 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(usage['transport']['reasoning_chars'], len('private reasoning'))
         self.assertNotIn('private reasoning', json.dumps(usage))
         self.connection.close.assert_called_once()
+        self.connection.sock.shutdown.assert_not_called()
 
     def test_errors_preserve_stage_without_raw_exception_or_key(self):
         for error, code in [(socket.gaierror('do-not-log-this-key'), 'provider_dns_error'),
@@ -328,6 +330,130 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(result[2]['transport']['api'], 'responses')
         with self.assertRaisesRegex(core.ReviewError, 'protocol_mismatch'):
             self.invoke([raw])
+
+    def invoke_local_stream(self, parts, backend, server_context=None):
+        stopped = threading.Event()
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            listener.listen(1)
+            listener.settimeout(2)
+            port = listener.getsockname()[1]
+            def serve():
+                try:
+                    connection, _ = listener.accept()
+                    if server_context is not None:
+                        connection = server_context.wrap_socket(connection, server_side=True)
+                    with connection:
+                        connection.settimeout(2)
+                        request = b''
+                        while b'\r\n\r\n' not in request:
+                            chunk = connection.recv(4096)
+                            if not chunk:
+                                return
+                            request += chunk
+                        headers, body = request.split(b'\r\n\r\n', 1)
+                        length = next(int(line.split(b':', 1)[1]) for line in headers.split(b'\r\n')
+                                      if line.lower().startswith(b'content-length:'))
+                        while len(body) < length:
+                            chunk = connection.recv(4096)
+                            if not chunk:
+                                return
+                            body += chunk
+                        for delay, data in parts:
+                            if stopped.wait(delay):
+                                break
+                            connection.sendall(data)
+                except OSError:
+                    pass
+            worker = threading.Thread(target=serve, daemon=True)
+            worker.start()
+            def invoke():
+                return transport.completion(f'https://localhost:{port}/v1/chat/completions',
+                                            'do-not-log-this-key', {'model': 'grok'}, backend)
+            try:
+                if server_context is not None:
+                    return invoke()
+                connection = transport.http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+                with patch.object(transport.http.client, 'HTTPSConnection', return_value=connection):
+                    return invoke()
+            finally:
+                stopped.set()
+                worker.join(3)
+                self.assertFalse(worker.is_alive())
+
+    def test_total_deadline_interrupts_trickling_headers(self):
+        budget = 0.5
+        parts = [(0, b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Slow: ')]
+        parts += [(0.04, bytes([value])) for value in b'x' * 40 + b'\r\n\r\n']
+        started = time.monotonic()
+        with self.assertRaisesRegex(core.ReviewError, '^provider_deadline_exceeded$') as caught:
+            self.invoke_local_stream(parts, {'timeout_seconds': budget, 'idle_timeout_seconds': 2})
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, budget - 0.05)
+        self.assertLess(elapsed, budget + 0.5)
+        metrics = caught.exception.diagnostics
+        self.assertEqual(metrics['stage'], 'headers')
+        self.assertEqual(metrics['bytes_received'], 0)
+        self.assertLess(metrics['elapsed_seconds'], budget + 0.5)
+        self.assertNotIn('do-not-log-this-key', json.dumps(metrics))
+
+    def test_total_deadline_interrupts_trickling_chunk_framing(self):
+        budget = 0.5
+        parts = [(0, b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n'
+                     b'Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n8\r\n: ping\n\n\r\n')]
+        parts += [(0.04, bytes([value])) for value in b'1;slow=' + b'x' * 40 + b'\r\n:\r\n0\r\n\r\n']
+        started = time.monotonic()
+        with self.assertRaisesRegex(core.ReviewError, '^provider_deadline_exceeded$') as caught:
+            self.invoke_local_stream(parts, {'timeout_seconds': budget, 'idle_timeout_seconds': 2})
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, budget - 0.05)
+        self.assertLess(elapsed, budget + 0.5)
+        metrics = caught.exception.diagnostics
+        self.assertEqual(metrics['stage'], 'read')
+        self.assertEqual(metrics['http_status'], 200)
+        self.assertEqual(metrics['bytes_received'], 8)
+        self.assertEqual(metrics['keepalive_lines'], 1)
+        self.assertLess(metrics['elapsed_seconds'], budget + 0.5)
+        self.assertNotIn('do-not-log-this-key', json.dumps(metrics))
+
+    def test_fast_local_stream_completes(self):
+        content = self.stream()
+        parts = [(0, b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n'
+                     b'Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n'),
+                 (0, f'{len(content):x}\r\n'.encode() + content + b'\r\n0\r\n\r\n')]
+        text, model, usage = self.invoke_local_stream(parts, {'timeout_seconds': 2})
+        self.assertEqual(text, '{"summary":"ok"}')
+        self.assertEqual(model, 'grok-4.6')
+        self.assertEqual(usage['total_tokens'], 42)
+        self.assertEqual(usage['transport']['reasoning_events'], 1)
+        self.assertNotIn('private reasoning', json.dumps(usage))
+
+    def test_total_deadline_interrupts_real_tls_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cert, key = Path(directory)/'cert.pem', Path(directory)/'key.pem'
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                            '-keyout', str(key), '-out', str(cert), '-days', '1',
+                            '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'],
+                           check=True, capture_output=True)
+            server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_context.load_cert_chain(cert, key)
+            client_context = ssl.create_default_context(cafile=str(cert))
+            headers = b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n'
+            for stage, prefix, framing in (
+                    ('headers', headers + b'X-Slow: ', b'x' * 40 + b'\r\n\r\n'),
+                    ('read', headers + b'Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n',
+                     b'1;slow=' + b'x' * 40 + b'\r\n:\r\n0\r\n\r\n')):
+                with self.subTest(stage=stage):
+                    parts = [(0, prefix)] + [(0.04, bytes([value])) for value in framing]
+                    budget = 0.5
+                    started = time.monotonic()
+                    with patch.object(transport.ssl, 'create_default_context', return_value=client_context), \
+                            self.assertRaisesRegex(core.ReviewError, '^provider_deadline_exceeded$') as caught:
+                        self.invoke_local_stream(parts, {'timeout_seconds': budget, 'idle_timeout_seconds': 2},
+                                                 server_context=server_context)
+                    self.assertLess(time.monotonic() - started, budget + 0.5)
+                    self.assertEqual(caught.exception.diagnostics['stage'], stage)
+                    self.assertNotIn('do-not-log-this-key', json.dumps(caught.exception.diagnostics))
 
     def test_real_tls_stream_with_connection_close(self):
         content = self.stream()
