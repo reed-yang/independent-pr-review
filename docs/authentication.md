@@ -1,9 +1,11 @@
 # Native agy OAuth and credentials
 
-The default Gemini lane runs the official Antigravity CLI (`agy`) 1.2.2 using its
-native consumer Google OAuth route. The binary and archive SHA-512 are pinned in
-`independent_review/agy-release.json`. The harness does not implement a substitute
-OAuth client, scrape browser cookies, or exchange consumer tokens through a proxy.
+The default Gemini lane runs the official Antigravity CLI (`agy`), currently 1.2.14,
+using its native consumer Google OAuth route. The binary and archive SHA-512 are pinned
+in `independent_review/agy-release.json`; the CLI's own auto-update stays disabled and
+newer releases arrive only as reviewed pin PRs (see [releasing](operations.md#releasing)).
+The harness does not implement a substitute OAuth client, scrape browser cookies, or
+exchange consumer tokens through a proxy.
 
 ## Provision from a trusted interactive machine
 

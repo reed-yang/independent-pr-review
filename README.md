@@ -101,7 +101,8 @@ python3 -m independent_review.cli validate-config --config examples/review.json 
 
 The installed `independent-review` command exposes the same phases. Action execution
 runs the package directly from the pinned Action directory, without installing or
-importing code from the PR. See [release procedure](docs/operations.md#releasing).
+importing code from the PR. See [release procedure](docs/operations.md#releasing),
+which also covers the daily watch that proposes official agy updates as reviewed PRs.
 
 Source was extracted from owner-authored Cortex repository tooling. Product code,
 private context, repository history and credentials are not included. No source
