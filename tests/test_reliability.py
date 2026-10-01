@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,7 +15,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from independent_review import cli, core, context, delivery, evidence, service, state, transport
-from test_engine import BASE, HEAD, REPO, answer, bundle, candidate, packet, pr, settings
+from test_engine import (BASE, HEAD, REPO, answer, bundle, candidate, echo_input_end, input_end, packet, pr, settings,
+                         verification_payload)
 
 
 class EvidenceTests(unittest.TestCase):
@@ -33,8 +35,8 @@ class EvidenceTests(unittest.TestCase):
         data = bundle()
         bad = {**candidate(), 'evidence': 'invented_evidence()'}
         response = answer([candidate(), bad])
-        runners = {'compatible_packet': lambda *args: (response, 'grok', {'total_tokens': 100}),
-                   'antigravity_packet': lambda *args: (answer(), 'gemini', {'total_tokens': 10})}
+        runners = echo_input_end({'compatible_packet': lambda *args: (response, 'grok', {'total_tokens': 100}),
+                                  'antigravity_packet': lambda *args: (answer(), 'gemini', {'total_tokens': 10})})
         lane = core.run_slot(data['config']['backends']['slots'][0], data['config']['backends']['backends'], data['packet'], runners)
         self.assertEqual(lane['status'], 'partial')
         self.assertEqual(len(lane['findings']), 1)
@@ -66,8 +68,8 @@ class EvidenceTests(unittest.TestCase):
         def failed(*args):
             calls.append(True)
             raise core.ReviewError('provider_idle_timeout', {'stage': 'read'})
-        result = service.run(bundle(), {'compatible_packet': failed,
-                                       'antigravity_packet': lambda *args: (answer([candidate()]), 'gemini', {})})
+        result = service.run(bundle(), echo_input_end({'compatible_packet': failed,
+                                                      'antigravity_packet': lambda *args: (answer([candidate()]), 'gemini', {})}))
         self.assertEqual(len(calls), 1)
         self.assertEqual(result['findings'][0]['status'], 'uncertain')
         self.assertEqual(result['verifications'][0]['error'], 'verification_skipped_after_provider_failure')
@@ -89,7 +91,7 @@ class EvidenceTests(unittest.TestCase):
                 {'finding_id': second['finding_id'], 'status': 'dismissed', 'reason': 'A guard exists.',
                  'evidence_path': second['path'], 'evidence': 'invented_guard()'}]
             return json.dumps({'decisions': decisions}), 'model', {'total_tokens': 321}
-        result = service.run(data, {name: runner for name in core.HARNESSES})
+        result = service.run(data, echo_input_end({name: runner for name in core.HARNESSES}))
         self.assertEqual(result['status'], 'partial')
         by_id = {item['finding_id']: item for item in result['findings']}
         self.assertEqual(by_id[first['finding_id']]['status'], 'open')
@@ -129,8 +131,8 @@ class EvidenceTests(unittest.TestCase):
             raise core.ReviewError('provider_deadline_exceeded', {
                 'stage': 'read', 'http_status': 200, 'reasoning_events': 30, 'content_events': 0,
                 'untrusted_error_body': 'private provider error text'})
-        result = service.run(data, {'compatible_packet': failed,
-                                   'antigravity_packet': lambda *args: (answer(), 'gemini', {})})
+        result = service.run(data, echo_input_end({'compatible_packet': failed,
+                                                  'antigravity_packet': lambda *args: (answer(), 'gemini', {})}))
         accepted = state.accept(state.reserve(data['state'], data, '1', 'url'), result, '1')
         rendered = delivery.summary(accepted, data['config']['limits'])
         self.assertIn('no final review text arrived before the configured time limit', rendered)
@@ -151,6 +153,111 @@ class EvidenceTests(unittest.TestCase):
         self.assertNotIn('rejected candidate', rendered)
         self.assertEqual((reused['runs'], reused['tokens']), (3, 1234))
         self.assertEqual(value['last_reviews'][0]['status'], 'failed')
+
+
+class InputEndTests(unittest.TestCase):
+    def test_every_model_call_ends_with_a_fresh_nonce_after_all_json(self):
+        data = bundle()
+        prompts = []
+        def runner(backend, prompt):
+            prompts.append(prompt)
+            if prompt.startswith('Independently challenge'):
+                return json.dumps({'decisions': [{'finding_id': item['finding_id'], 'status': 'uncertain', 'reason': 'Missing callers.'}
+                                                 for item in verification_payload(prompt)['candidates']]}), 'model', {}
+            return answer([candidate()] if backend['opinion_family'] == 'grok' else []), 'model', {}
+        runners = echo_input_end({name: runner for name in core.HARNESSES})
+        first, second = service.run(copy.deepcopy(data), runners), service.run(copy.deepcopy(data), runners)
+        self.assertEqual(first['status'], 'completed')
+        self.assertEqual(len(prompts), 6)
+        nonces = []
+        for prompt in prompts:
+            body, final = prompt.rsplit('\n', 1)
+            self.assertRegex(final, r'\AEND_OF_INPUT_NONCE=[0-9a-f]{16}\Z')
+            start = body.index('{"packet":') if prompt.startswith('Independently challenge') else body.index('Packet JSON:\n') + 13
+            self.assertEqual(json.JSONDecoder().raw_decode(body, start)[1], len(body))
+            self.assertIn('input_end_nonce', body[:start])
+            nonces.append(final.split('=', 1)[1])
+        self.assertEqual(len(set(nonces)), len(nonces))
+        # The nonce is per call and never part of packet or bundle identity.
+        self.assertEqual((first['packet_id'], first['bundle_id']), (second['packet_id'], second['bundle_id']))
+        self.assertFalse(any(nonce in json.dumps([first, second]) for nonce in nonces))
+
+    def test_missing_or_mismatched_generation_nonce_is_partial_for_every_harness(self):
+        backends = settings()['backends']['backends']
+        def runner(value):
+            def call(backend, prompt):
+                reply = json.loads(answer([candidate()]))
+                if value != 'absent':
+                    reply['input_end_nonce'] = input_end(prompt) if value is None else value
+                return json.dumps(reply), 'model', {'total_tokens': 5}
+            return call
+        cases = [(None, 'completed', None), ('absent', 'partial', 'input_end_nonce_missing'),
+                 ('', 'partial', 'input_end_nonce_missing'), ('f' * 16, 'partial', 'input_end_nonce_mismatch')]
+        for backend_id in ('grok-gateway', 'gemini-gateway', 'gemini-ai-pro'):
+            backend = backends[backend_id]
+            slot = {'id': 'Lane', 'opinion_family': backend['opinion_family'], 'backends': [backend_id]}
+            for value, status, error in cases:
+                with self.subTest(backend=backend_id, value=value), patch.dict(os.environ, {}, clear=True):
+                    lane = core.run_slot(slot, backends, packet(), {backend['harness']: runner(value)})
+                    self.assertEqual((lane['status'], lane.get('error'), lane['attempts'][-1].get('error')), (status, error, error))
+                    self.assertEqual(len(lane['findings']), 1)
+                    self.assertNotIn('f' * 16, json.dumps(lane))
+                    if error:
+                        self.assertEqual(lane['attempts'][-1]['stage'], 'validation')
+
+    def test_truncated_generation_never_advances_a_successful_baseline(self):
+        data = bundle()
+        reply = lambda *args: (answer(), 'model', {'total_tokens': 10})
+        runners = {**echo_input_end({'compatible_packet': reply}), 'antigravity_packet': reply}
+        result = service.run(data, runners)
+        lanes = {lane['slot']: lane for lane in result['reviews']}
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual((lanes['Gemini']['status'], lanes['Gemini']['error']), ('partial', 'input_end_nonce_missing'))
+        self.assertEqual(lanes['Grok']['status'], 'completed')
+        accepted = state.accept(state.reserve(data['state'], data, '1', 'url'), result, '1')
+        self.assertEqual(set(accepted['lanes']), {'Grok'})
+        rendered = delivery.summary(accepted, data['config']['limits'])
+        self.assertIn('input_end_nonce_missing', rendered)
+        self.assertIn('may have been truncated', rendered)
+        self.assertIn('Do not interpret this status as a clean review', rendered)
+        self.assertIn('may have been truncated', delivery.report(result))
+
+    def test_truncated_verification_keeps_valid_decisions_but_stays_partial(self):
+        for end, error in (({}, 'input_end_nonce_missing'), ({'input_end_nonce': 'f' * 16}, 'input_end_nonce_mismatch')):
+            data = bundle()
+            def runner(backend, prompt):
+                if prompt.startswith('Independently challenge'):
+                    decisions = [{'finding_id': item['finding_id'], 'status': 'confirmed', 'reason': 'Empty input raises.',
+                                  'evidence_path': 'src/a.py', 'evidence': 'return value[0]'}
+                                 for item in verification_payload(prompt)['candidates']]
+                    return json.dumps({'decisions': decisions, **end}), 'model', {'total_tokens': 7}
+                findings = [candidate()] if backend['opinion_family'] == 'grok' else []
+                return json.dumps({**json.loads(answer(findings)), 'input_end_nonce': input_end(prompt)}), 'model', {'total_tokens': 10}
+            with self.subTest(error=error):
+                result = service.run(data, {name: runner for name in core.HARNESSES})
+                verification = result['verifications'][0]
+                self.assertEqual((verification['status'], verification['error']), ('partial', error))
+                self.assertEqual(result['findings'][0]['status'], 'open')
+                self.assertEqual(result['status'], 'partial')
+                self.assertEqual({lane['status'] for lane in result['reviews']}, {'partial'})
+                accepted = state.accept(state.reserve(data['state'], data, '1', 'url'), result, '1')
+                self.assertFalse(accepted['lanes'])
+                self.assertIn(f'Gemini: verification partial ({error}).', delivery.report(result))
+                self.assertNotIn('f' * 16, json.dumps(result))
+
+    def test_strict_parsers_require_the_nonce_only_when_one_was_sent(self):
+        nonce = core.input_nonce()
+        reply = json.loads(answer())
+        with self.assertRaisesRegex(core.ReviewError, 'input_end_nonce_missing'):
+            core.parse_findings(json.dumps(reply), packet(), nonce=nonce)
+        self.assertIsNone(core.parse_findings(json.dumps({**reply, 'input_end_nonce': nonce}), packet(), nonce=nonce)['input_end_error'])
+        decision = {'finding_id': candidate()['finding_id'], 'status': 'uncertain', 'reason': 'Missing callers.'}
+        with self.assertRaisesRegex(core.ReviewError, 'input_end_nonce_mismatch'):
+            service.parse_decisions(json.dumps({'decisions': [decision], 'input_end_nonce': 'f' * 16}), packet(),
+                                    [candidate()], nonce=nonce)
+        # The fixed native OAuth smoke prompt carries no nonce and is not a packet review.
+        smoke = core.parse_findings('{"summary":"OAuth smoke passed","limitations":[],"findings":[]}', {'files': []})
+        self.assertNotIn('input_end_error', smoke)
 
 
 class StreamingTests(unittest.TestCase):
@@ -192,6 +299,7 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(usage['transport']['reasoning_chars'], len('private reasoning'))
         self.assertNotIn('private reasoning', json.dumps(usage))
         self.connection.close.assert_called_once()
+        self.connection.sock.shutdown.assert_not_called()
 
     def test_errors_preserve_stage_without_raw_exception_or_key(self):
         for error, code in [(socket.gaierror('do-not-log-this-key'), 'provider_dns_error'),
@@ -329,6 +437,130 @@ class StreamingTests(unittest.TestCase):
         with self.assertRaisesRegex(core.ReviewError, 'protocol_mismatch'):
             self.invoke([raw])
 
+    def invoke_local_stream(self, parts, backend, server_context=None):
+        stopped = threading.Event()
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            listener.listen(1)
+            listener.settimeout(2)
+            port = listener.getsockname()[1]
+            def serve():
+                try:
+                    connection, _ = listener.accept()
+                    if server_context is not None:
+                        connection = server_context.wrap_socket(connection, server_side=True)
+                    with connection:
+                        connection.settimeout(2)
+                        request = b''
+                        while b'\r\n\r\n' not in request:
+                            chunk = connection.recv(4096)
+                            if not chunk:
+                                return
+                            request += chunk
+                        headers, body = request.split(b'\r\n\r\n', 1)
+                        length = next(int(line.split(b':', 1)[1]) for line in headers.split(b'\r\n')
+                                      if line.lower().startswith(b'content-length:'))
+                        while len(body) < length:
+                            chunk = connection.recv(4096)
+                            if not chunk:
+                                return
+                            body += chunk
+                        for delay, data in parts:
+                            if stopped.wait(delay):
+                                break
+                            connection.sendall(data)
+                except OSError:
+                    pass
+            worker = threading.Thread(target=serve, daemon=True)
+            worker.start()
+            def invoke():
+                return transport.completion(f'https://localhost:{port}/v1/chat/completions',
+                                            'do-not-log-this-key', {'model': 'grok'}, backend)
+            try:
+                if server_context is not None:
+                    return invoke()
+                connection = transport.http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+                with patch.object(transport.http.client, 'HTTPSConnection', return_value=connection):
+                    return invoke()
+            finally:
+                stopped.set()
+                worker.join(3)
+                self.assertFalse(worker.is_alive())
+
+    def test_total_deadline_interrupts_trickling_headers(self):
+        budget = 0.5
+        parts = [(0, b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Slow: ')]
+        parts += [(0.04, bytes([value])) for value in b'x' * 40 + b'\r\n\r\n']
+        started = time.monotonic()
+        with self.assertRaisesRegex(core.ReviewError, '^provider_deadline_exceeded$') as caught:
+            self.invoke_local_stream(parts, {'timeout_seconds': budget, 'idle_timeout_seconds': 2})
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, budget - 0.05)
+        self.assertLess(elapsed, budget + 0.5)
+        metrics = caught.exception.diagnostics
+        self.assertEqual(metrics['stage'], 'headers')
+        self.assertEqual(metrics['bytes_received'], 0)
+        self.assertLess(metrics['elapsed_seconds'], budget + 0.5)
+        self.assertNotIn('do-not-log-this-key', json.dumps(metrics))
+
+    def test_total_deadline_interrupts_trickling_chunk_framing(self):
+        budget = 0.5
+        parts = [(0, b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n'
+                     b'Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n8\r\n: ping\n\n\r\n')]
+        parts += [(0.04, bytes([value])) for value in b'1;slow=' + b'x' * 40 + b'\r\n:\r\n0\r\n\r\n']
+        started = time.monotonic()
+        with self.assertRaisesRegex(core.ReviewError, '^provider_deadline_exceeded$') as caught:
+            self.invoke_local_stream(parts, {'timeout_seconds': budget, 'idle_timeout_seconds': 2})
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, budget - 0.05)
+        self.assertLess(elapsed, budget + 0.5)
+        metrics = caught.exception.diagnostics
+        self.assertEqual(metrics['stage'], 'read')
+        self.assertEqual(metrics['http_status'], 200)
+        self.assertEqual(metrics['bytes_received'], 8)
+        self.assertEqual(metrics['keepalive_lines'], 1)
+        self.assertLess(metrics['elapsed_seconds'], budget + 0.5)
+        self.assertNotIn('do-not-log-this-key', json.dumps(metrics))
+
+    def test_fast_local_stream_completes(self):
+        content = self.stream()
+        parts = [(0, b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n'
+                     b'Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n'),
+                 (0, f'{len(content):x}\r\n'.encode() + content + b'\r\n0\r\n\r\n')]
+        text, model, usage = self.invoke_local_stream(parts, {'timeout_seconds': 2})
+        self.assertEqual(text, '{"summary":"ok"}')
+        self.assertEqual(model, 'grok-4.6')
+        self.assertEqual(usage['total_tokens'], 42)
+        self.assertEqual(usage['transport']['reasoning_events'], 1)
+        self.assertNotIn('private reasoning', json.dumps(usage))
+
+    def test_total_deadline_interrupts_real_tls_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cert, key = Path(directory)/'cert.pem', Path(directory)/'key.pem'
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                            '-keyout', str(key), '-out', str(cert), '-days', '1',
+                            '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'],
+                           check=True, capture_output=True)
+            server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_context.load_cert_chain(cert, key)
+            client_context = ssl.create_default_context(cafile=str(cert))
+            headers = b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n'
+            for stage, prefix, framing in (
+                    ('headers', headers + b'X-Slow: ', b'x' * 40 + b'\r\n\r\n'),
+                    ('read', headers + b'Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n',
+                     b'1;slow=' + b'x' * 40 + b'\r\n:\r\n0\r\n\r\n')):
+                with self.subTest(stage=stage):
+                    parts = [(0, prefix)] + [(0.04, bytes([value])) for value in framing]
+                    budget = 0.5
+                    started = time.monotonic()
+                    with patch.object(transport.ssl, 'create_default_context', return_value=client_context), \
+                            self.assertRaisesRegex(core.ReviewError, '^provider_deadline_exceeded$') as caught:
+                        self.invoke_local_stream(parts, {'timeout_seconds': budget, 'idle_timeout_seconds': 2},
+                                                 server_context=server_context)
+                    self.assertLess(time.monotonic() - started, budget + 0.5)
+                    self.assertEqual(caught.exception.diagnostics['stage'], stage)
+                    self.assertNotIn('do-not-log-this-key', json.dumps(caught.exception.diagnostics))
+
     def test_real_tls_stream_with_connection_close(self):
         content = self.stream()
         class Handler(BaseHTTPRequestHandler):
@@ -443,15 +675,15 @@ class ReasoningBudgetTests(unittest.TestCase):
         data = bundle()
         def failed(*args):
             raise core.ReviewError('provider_deadline_exceeded')
-        runners = {'compatible_packet': failed,
-                   'antigravity_packet': lambda *args: (answer(), 'gemini', {'total_tokens': 10})}
+        runners = echo_input_end({'compatible_packet': failed,
+                                  'antigravity_packet': lambda *args: (answer(), 'gemini', {'total_tokens': 10})})
         result = service.run(data, runners)
         grok = next(lane for lane in result['reviews'] if lane['slot'] == 'Grok')
         self.assertEqual(result['accounted_tokens'], grok['input_context']['estimated_prompt_tokens'] + 128000 + 10)
         config = data['config']['backends']
         checked = service.verify(config['slots'][0], config, data['packet'], [candidate()], runners)
         self.assertEqual(checked['accounted_tokens'],
-                         core.estimate_tokens(service.verification_prompt(data['packet'], [candidate()])) + 128000)
+                         core.estimate_tokens(service.verification_prompt(data['packet'], [candidate()], core.input_nonce())) + 128000)
 
     def test_invalid_or_context_exhausting_completion_reserve_fails_before_inference(self):
         for reserve in (True, 0, 6499, 500000):

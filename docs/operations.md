@@ -28,11 +28,15 @@ snapshot clears transient failure notes without refunding consumed run budget.
 | Symptom | Action |
 | --- | --- |
 | `http_503`, no upstream accounts, quota errors | Fix the selected provider group/account and retry within the budget; no fallback is automatic. |
-| `provider_connect_timeout`, `provider_headers_timeout`, `provider_idle_timeout`, `provider_deadline_exceeded` | Inspect redacted stage, timing, byte and event counters in result.json. Grok defaults to 20s connect, 120s socket idle and 3600s total for xhigh; Gemini remains at 600s total. Streaming keepalives do not extend the total deadline. No automatic retry spends another full call. |
+| `provider_connect_timeout`, `provider_headers_timeout`, `provider_idle_timeout`, `provider_deadline_exceeded` | Inspect redacted stage, timing, byte and event counters in result.json. Grok defaults to 20s connect, 120s socket idle and 3600s total for xhigh; Gemini remains at 600s total. Streaming keepalives do not extend the total deadline. A timer shuts down the connected socket at that deadline, including during slow headers or chunk framing; interrupted reads retain `provider_deadline_exceeded` and safe diagnostics. No automatic retry spends another full call. |
 | `provider_progress_timeout` | No nonempty reasoning or final-text delta arrived within an explicitly configured `progress_timeout_seconds`. Disabled by default: silent internal reasoning can outlast visible summaries. Keepalive comments and status-only events do not renew this optional budget. Compare `last_byte_seconds`, `last_progress_seconds`, `seconds_without_progress` and `keepalive_lines`. This is an incomplete review, not proof of an upstream crash or a clean result. JSON responses that ignore streaming retain the existing socket/total limits because they expose no incremental progress. |
 | `provider_stream_error` with `incomplete_reason` | The upstream explicitly ended the response as incomplete. Inspect the allowlisted reason and numeric `provider_usage`, including `reasoning_tokens`; partial text is never accepted as a completed review. `max_output_tokens` semantics differ across providers and must not be assumed to bound internal reasoning. |
 | `provider_dns_error`, `provider_tls_error`, `provider_connection_error` | Check the configured gateway/network. Diagnostics never contain raw exceptions, headers, response bodies or credentials. |
+| `input_end_nonce_missing`, `input_end_nonce_mismatch` | The model did not echo the per-call end-of-input nonce, so it may have seen only a prefix of its input; native agy truncates an oversized input step without failing. Evidence-checked candidates and decisions are kept, but the lane or verification batch stays partial and no baseline advances. Compare the lane's estimated input with the native step cap in result.md; repeated failures on small inputs mean the model ignored the output contract. |
+| `lane_diff_omitted` | The lane's input budget (for native agy, the step cap) could not hold every changed-file diff, so whole diffs were left out (`diff_lane_budget` in result.json). Its findings are kept, but the lane stays partial and its baseline does not advance, so later incremental runs still cover those files. Reduce the changed text per PR. |
+| `required_evidence_exceeds_lane_context`, `packet_metadata_exceeds_lane_context` | Required diffs, PR metadata or omission records exceed that lane's input budget after optional source was dropped. That lane or verification batch fails at stage `input` without a model call; the other lane's result is kept and the run is partial. |
 | Rejected candidate or verification evidence | Inspect its redacted, bounded quote preview and reason in result.json. Literal contiguous diff-side quotes are accepted without diff markers. Invalid generation candidates are excluded; invalid verification decisions become uncertain. Valid siblings are retained, but the review remains partial and cannot advance a successful baseline. Copy contiguous source quotes exactly, preserving line breaks; use a short decisive quote instead of joining locations. |
+| `agy_error_<status>`, `agy_error_unclassified` | agy (1.2.6+) ended the turn with a structured `AGY_ERROR` line, normally exit code 3; the code keeps only its canonical status, for example `agy_error_resource_exhausted`. Diagnostics keep `retryable`, `code_kind` and a numeric `error_code`; message text and error IDs are discarded. `retryable` is informational and triggers no automatic retry. Check the account's quota/model access, then retry within the budget. |
 | `agy_authentication_required`, refresh rotation | Log in interactively and resync encrypted OAuth; do not paste tokens in comments. |
 | Missing state/provider Secret in reusable jobs | Preserve explicit caller secret name mappings and the callee declarations; Environment binding alone can yield empty values. |
 | State signature mismatch | Restore the correct state key. Do not silently delete/reset state to bypass budgets. |
@@ -87,10 +91,30 @@ never advance the successful baseline or become a clean cached opinion.
 4. Consumers update their workflow to B in a reviewed PR. They can roll back by
    restoring the prior immutable SHA; mutable tags are not used for execution.
 
+The `Official agy release watch` workflow runs daily and on dispatch from the default
+branch. `scripts/agy_release.py check` compares the pin with Google's linux_amd64 and
+darwin_arm64 update manifests. For a newer version, `update` downloads both archives,
+verifies their SHA-512 and statically checks that the linux binary still sets the
+qualified 64000-token `MaxTokensPerUserInputStep`; a miss fails with
+`native_step_cap_unqualified` and leaves the pin for human qualification. Same-version
+manifests with different artifacts, or older manifests, also fail for human review.
+After the provider-free checks pass, the job creates or updates branch
+`chore/agy-<version>` and its PR, leaving an existing branch's commits unchanged; a
+closed PR for that version is respected until reopened manually. Only same-repository
+PRs count, since fork PRs can reuse the branch name, and an open PR's body is updated
+only while its head is the branch tip. Allow GitHub Actions to create pull requests
+in the repository settings. PRs created with
+`GITHUB_TOKEN` trigger no other workflows, so the PR body records this job's evidence;
+dispatch `Harness checks` on the branch when CI on its head is needed. The tracking
+flow is: watch PR, review (agy changelog, runner compatibility), merge and engine
+release (steps 1-3), then consumer pin update (step 4). Dependabot proposes external
+Action SHA updates weekly; the engine self-pin is excluded.
+
 Engine CI has no provider Secrets. Consumer runs validate actual gateway/OAuth
 access. Protect release tags and default-branch workflow/config changes according
 to the collaboration model of each project. Do not install the review as a required
 merge check until its quota, reliability and noise are understood for that project.
+Engine CI runs on both `ubuntu-latest` and `ubuntu-26.04` during the runner migration.
 
 
 The default Grok adapter uses native `/responses` with `reasoning.effort`, rather

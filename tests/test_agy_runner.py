@@ -73,6 +73,68 @@ class AgyRunnerTests(unittest.TestCase):
             self.run_fake(body)
         self.assertEqual(str(failure.exception), "agy_authentication_required")
 
+    def failed_turn(self, stderr, exit_code, status="ERROR"):
+        # Event order recorded from agy 1.2.14 stream-json when the model API fails.
+        body = 'print(json.dumps({"event":"init", "init":{"tools":["read_file"],"agent":"independent-packet-review","model":"gemini-test","permission_mode":"request-review"}}), flush=True)\n'
+        body += 'sys.stdin.readline()\n'
+        body += 'print(json.dumps({"event":"step_update", "step_update":{"step_index":0,"state":"DONE","step_type":"user_input"}}), flush=True)\n'
+        body += 'print(json.dumps({"event":"step_update", "step_update":{"step_index":1,"state":"DONE","step_type":"error_message"}}), flush=True)\n'
+        body += 'print(json.dumps({"event":"result", "result":' + repr(self.result(status=status, error="Message: private-diagnostic")) + '}), flush=True)\n'
+        body += 'sys.stderr.write(' + repr(stderr) + ')\n'
+        body += 'sys.exit(' + str(exit_code) + ')\n'
+        return body
+
+    def test_structured_cli_error_is_classified_without_message_or_error_id(self):
+        line = 'AGY_ERROR: ' + json.dumps({"short_error": "Message: private-diagnostic", "status": "RESOURCE_EXHAUSTED",
+                                           "error_code": 429, "code_kind": "http", "retryable": True,
+                                           "error_id": "private-error-id"})
+        with self.assertRaises(agy_runner.AgyError) as failure:
+            self.run_fake(self.failed_turn("error: Message: private-diagnostic\n" + line + "\n", 3))
+        self.assertEqual(str(failure.exception), "agy_error_resource_exhausted")
+        self.assertEqual(failure.exception.diagnostics, {"retryable": True, "code_kind": "http", "error_code": 429})
+        self.assertNotIn("private", str(failure.exception) + json.dumps(failure.exception.diagnostics))
+
+    def test_structured_cli_error_fails_even_with_zero_exit_or_success_result(self):
+        line = 'AGY_ERROR: {"status":"UNAVAILABLE","error_code":14,"code_kind":"grpc","retryable":true}\r\n'
+        with self.assertRaises(agy_runner.AgyError) as failure:
+            self.run_fake(self.failed_turn(line, 0, status="SUCCESS"))
+        self.assertEqual(str(failure.exception), "agy_error_unavailable")
+        self.assertEqual(failure.exception.diagnostics, {"retryable": True, "code_kind": "grpc", "error_code": 14})
+
+    def test_error_step_without_structured_line_fails_closed(self):
+        for exit_code, expected in [(0, "agy_incomplete_result"), (3, "agy_process_failed")]:
+            with self.subTest(exit_code=exit_code):
+                with self.assertRaises(agy_runner.AgyError) as failure:
+                    self.run_fake(self.failed_turn("", exit_code, status="SUCCESS"))
+                self.assertEqual(str(failure.exception), expected)
+
+    def test_unrecognized_structured_errors_are_redacted(self):
+        self.assertIsNone(agy_runner.structured_failure(b"warning: retrying\nnote AGY_ERROR: {}\n"))
+        for line, diagnostics in [
+            (b'{"short_error":"private-diagnostic"}', {}),
+            (b'{"short_error":"private', {}),
+            (b'["private"]', {}),
+            (b'{"status":"private value","retryable":"yes","error_code":true,"code_kind":"http"}', {}),
+            (b'{"status":"' + b"A" * 41 + b'","retryable":false,"error_code":503,"code_kind":"private"}', {"retryable": False}),
+            (b'{"status":"lowercase","error_code":1000,"code_kind":"http"}', {}),
+        ]:
+            with self.subTest(line=line):
+                failure = agy_runner.structured_failure(b"AGY_ERROR: " + line + b"\n")
+                self.assertEqual(str(failure), "agy_error_unclassified")
+                self.assertEqual(failure.diagnostics, diagnostics)
+        # The final structured line describes the terminated turn.
+        failure = agy_runner.structured_failure(b'AGY_ERROR: {"status":"INTERNAL"}\nAGY_ERROR: {"status":"INVALID_ARGUMENT"}\n')
+        self.assertEqual(str(failure), "agy_error_invalid_argument")
+
+    def test_review_error_keeps_redacted_agy_diagnostics(self):
+        from independent_review import core
+        failure = agy_runner.AgyError("agy_error_unavailable", {"retryable": True})
+        with patch.object(agy_runner, "run", side_effect=failure):
+            with self.assertRaises(core.ReviewError) as wrapped:
+                core.run_agy({}, "packet")
+        self.assertEqual(str(wrapped.exception), "agy_error_unavailable")
+        self.assertEqual(wrapped.exception.diagnostics, {"retryable": True})
+
     def test_unexpected_tool_action_fails_even_when_tools_were_empty(self):
         body = 'print(json.dumps({"event":"init", "init":{"tools":[],"agent":"independent-packet-review","model":"gemini-test","permission_mode":"request-review"}}), flush=True)\n'
         body += 'sys.stdin.readline()\n'
@@ -168,6 +230,11 @@ class AgyRunnerTests(unittest.TestCase):
         result["response"] += '\n{"summary":"another response"}'
         with self.assertRaisesRegex(agy_runner.AgyError, "invalid_review_json"):
             agy_runner.result_payload(result, b"")
+
+    def test_native_payload_keeps_the_end_of_input_nonce_for_validation(self):
+        output = {"summary": "Reviewed", "limitations": [], "findings": [], "input_end_nonce": "0123456789abcdef"}
+        raw, _ = agy_runner.result_payload(self.result(structured_output=output), b"")
+        self.assertEqual(json.loads(raw)["input_end_nonce"], "0123456789abcdef")
 
     def test_non_string_cli_responses_are_redacted_failures(self):
         for response in [None, [], {}, 7]:

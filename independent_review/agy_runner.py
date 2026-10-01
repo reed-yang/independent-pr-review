@@ -16,6 +16,10 @@ import time
 class AgyError(Exception):
     """A redacted CLI or credential-lifecycle failure."""
 
+    def __init__(self, code, diagnostics=None):
+        super().__init__(code)
+        self.diagnostics = diagnostics or {}
+
 
 AGENT = "independent-packet-review"
 DENIED_ACTIONS = ("read_file", "write_file", "read_url", "execute_url", "command", "mcp")
@@ -93,6 +97,27 @@ def parse_event(line):
     return event
 
 
+def structured_failure(stderr):
+    """Classify the CLI's final AGY_ERROR line without its message or error ID."""
+    lines = re.findall(rb"^AGY_ERROR: (.*?)\r?$", stderr, re.M)
+    if not lines:
+        return None
+    try:
+        report = json.loads(lines[-1])
+    except (ValueError, UnicodeError):
+        report = None
+    if not isinstance(report, dict):
+        return AgyError("agy_error_unclassified")
+    status = report.get("status")
+    code = "agy_error_" + status.lower() if isinstance(status, str) and re.fullmatch(r"[A-Z_]{1,40}", status) else "agy_error_unclassified"
+    diagnostics = {}
+    if type(report.get("retryable")) is bool:
+        diagnostics["retryable"] = report["retryable"]
+    if report.get("code_kind") in ("http", "grpc") and type(report.get("error_code")) is int and 0 <= report["error_code"] <= 999:
+        diagnostics.update(code_kind=report["code_kind"], error_code=report["error_code"])
+    return AgyError(code, diagnostics)
+
+
 def result_payload(result, stderr):
     if not isinstance(result, dict) or result.get("status") != "SUCCESS":
         raise AgyError("agy_incomplete_result")
@@ -130,6 +155,7 @@ def stream_review(command, prompt, cwd, env, timeout, model):
     stderr = bytearray()
     total = 0
     initialized = False
+    errored = False
     result = None
     deadline = time.monotonic() + timeout
     try:
@@ -173,8 +199,8 @@ def stream_review(command, prompt, cwd, env, timeout, model):
                         kind = event.get("event")
                         if kind == "init":
                             initialization = event.get("init")
-                            # 1.2.2 reports the global registry here, even for a
-                            # custom agent that excludes all default tools.
+                            # 1.2.2 and 1.2.14 report the global registry here, even
+                            # for a custom agent that excludes all default tools.
                             if initialized or not isinstance(initialization, dict) or (
                                 initialization.get("agent") != AGENT or
                                 initialization.get("model") != model or
@@ -195,8 +221,10 @@ def stream_review(command, prompt, cwd, env, timeout, model):
                             result = candidate
                         elif kind == "step_update":
                             step = event.get("step_update", {})
-                            if not initialized or not isinstance(step, dict) or step.get("step_type") not in ("user_input", "agent_response", "checkpoint"):
+                            if not initialized or not isinstance(step, dict) or step.get("step_type") not in ("user_input", "agent_response", "checkpoint", "error_message"):
                                 raise AgyError("agy_unexpected_agent_action")
+                            # A failed turn is classified from stderr after exit.
+                            errored = errored or step["step_type"] == "error_message"
                         else:
                             raise AgyError("agy_unexpected_event")
             if stdout.strip():
@@ -206,10 +234,17 @@ def stream_review(command, prompt, cwd, env, timeout, model):
             code = process.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
             raise AgyError("agy_timeout") from None
+        # agy >= 1.2.6 reports a terminated turn on stderr and exits with 3;
+        # any exit status with this line is a failed review.
+        failure = structured_failure(bytes(stderr))
+        if failure is not None:
+            raise failure
         if code:
             if re.search(rb"not (?:signed|logged) in|authentication required|cannot complete interactive login", stderr, re.I):
                 raise AgyError("agy_authentication_required")
             raise AgyError("agy_process_failed")
+        if errored:
+            raise AgyError("agy_incomplete_result")
         return result_payload(result, bytes(stderr))
     finally:
         kill_group(process)

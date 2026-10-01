@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from independent_review import core as review
+from test_engine import echo_input_end, input_end
 
 
 def packet():
@@ -76,9 +77,9 @@ class OutputTests(unittest.TestCase):
             return json.dumps(answer()), "grok-test", {}
         def gemini(*args):
             return json.dumps({"summary": "No finding", "limitations": [], "findings": []}), "gemini-test", {}
-        result = review.run_reviews(packet(), configuration(), {
+        result = review.run_reviews(packet(), configuration(), echo_input_end({
             "compatible_packet": grok, "antigravity_packet": gemini,
-        })
+        }))
         self.assertEqual(result["status"], "completed")
         self.assertEqual(len(result["reviews"][0]["findings"]), 1)
         self.assertEqual(len(result["reviews"][1]["findings"]), 0)
@@ -86,10 +87,10 @@ class OutputTests(unittest.TestCase):
     def test_failed_backend_is_partial_not_clean(self):
         def fail(*args):
             raise review.ReviewError("http_403")
-        result = review.run_reviews(packet(), configuration(), {
+        result = review.run_reviews(packet(), configuration(), echo_input_end({
             "compatible_packet": lambda *args: (json.dumps(answer()), "grok", {}),
             "antigravity_packet": fail,
-        })
+        }))
         self.assertEqual(result["status"], "partial")
 
     def test_mentions_and_model_links_are_not_rendered_as_active_markup(self):
@@ -231,9 +232,13 @@ class GatewayTests(unittest.TestCase):
         def reply(url, key, data, **kwargs):
             if "/chat/completions" in url:
                 self.assertEqual(key, "grok-secret")
-                return {"model": "grok-test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(answer())}}]}
+                content = {**answer(), "input_end_nonce": input_end(data["messages"][0]["content"])}
+                return {"model": "grok-test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(content)}}]}
             self.assertEqual(key, "gemini-secret")
-            return self.response()
+            response = self.response()
+            text = {**answer(), "input_end_nonce": input_end(data["contents"][0]["parts"][0]["text"])}
+            response["candidates"][0]["content"]["parts"][1]["text"] = json.dumps(text)
+            return response
         def stream(url, key, payload, backend):
             response = reply(url, key, payload)
             return response['choices'][0]['message']['content'], response['model'], {}
