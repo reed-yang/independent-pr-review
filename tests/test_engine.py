@@ -181,6 +181,111 @@ class ContextTests(unittest.TestCase):
         self.assertTrue(all(item['base_text'] is None for item in data['files']))
         self.assertEqual({item['reason'] for item in data['omitted']}, {'base_text_unavailable_or_budget'})
 
+    def collect_with(self, files, contents, cfg, tree, prior=()):
+        snapshot = pr()
+        snapshot['changed_files'] = len(files)
+        def api(repo, path):
+            if path == 'pulls/7':
+                return snapshot
+            if path.startswith('pulls/7/files'):
+                return files
+            if path.startswith('compare/'):
+                return {'merge_base_commit': {'sha': BASE}}
+            if path.startswith('git/trees/'):
+                return {'tree': [{'type': 'blob', 'path': name} for name in tree]}
+            if path.startswith('contents/'):
+                name = path[len('contents/'):].split('?ref=')[0]
+                if name not in contents:
+                    raise core.ReviewError('http_404')
+                return {'type': 'file', 'encoding': 'base64', 'size': len(contents[name]),
+                        'content': base64.b64encode(contents[name].encode()).decode()}
+            raise AssertionError(path)
+        value = state.initial(REPO, 7)
+        for index, name in enumerate(prior):
+            value['findings'][f'finding-{index}'] = {'path': name, 'status': 'open'}
+        return context.collect(REPO, 7, snapshot, cfg, value, api=api)
+
+    def test_largest_change_head_text_is_admitted_regardless_of_api_order(self):
+        patch_text = '@@ -1 +1 @@\n-old\n+new'
+        files = [{'filename': 'src/copy.ts', 'status': 'modified', 'additions': 3, 'deletions': 3, 'patch': patch_text},
+                 {'filename': 'src/use-control-state.ts', 'status': 'modified', 'additions': 120, 'deletions': 40, 'patch': patch_text}]
+        contents = {'src/copy.ts': 'c' * 100, 'src/use-control-state.ts': 'u' * 100}
+        cfg = settings()
+        cfg['limits']['context_chars'] = 150
+        for order in (files, files[::-1]):
+            data = self.collect_with(order, contents, cfg, [])
+            # Diffs keep GitHub's order; only source admission is reordered.
+            self.assertEqual([entry['path'] for entry in data['files']], [item['filename'] for item in order])
+            texts = {entry['path']: entry['head_text'] for entry in data['files']}
+            self.assertEqual(texts, {'src/copy.ts': None, 'src/use-control-state.ts': 'u' * 100})
+            self.assertIn({'path': 'src/copy.ts', 'reason': 'head_text_unavailable_or_budget'}, data['omitted'])
+        # Without GitHub's counts, the patch's changed lines decide the order.
+        self.assertEqual(context.change_size({'patch': '@@ -1,2 +1,3 @@\n-a\n+b\n+c\n\n same'}), 3)
+
+    def test_explicit_include_precedes_base_text_under_tight_budget(self):
+        files = [{'filename': 'src/a.py', 'status': 'modified', 'patch': '@@ -1 +1 @@\n-old\n+new'}]
+        contents = {'src/a.py': 'x' * 40, 'config/settings.toml': 'y' * 40}
+        cfg = settings()
+        cfg['context'] = {'include': ['config/*.toml']}
+        cfg['limits']['context_chars'] = 100
+        data = self.collect_with(files, contents, cfg, ['src/a.py', 'config/settings.toml'])
+        self.assertEqual(data['files'][0]['head_text'], 'x' * 40)
+        self.assertEqual(data['context'], [{'path': 'config/settings.toml', 'reason': 'configured_context', 'head_text': 'y' * 40}])
+        self.assertIsNone(data['files'][0]['base_text'])
+        self.assertEqual(data['omitted'], [{'path': 'src/a.py', 'reason': 'base_text_unavailable_or_budget'}])
+
+    def test_unadmitted_explicit_context_is_reported_with_reason(self):
+        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
+        contents = {'src/a.py': 'x' * 40, 'config/a.toml': 'a' * 40, 'config/big.toml': 'z' * 500,
+                    'config/c.toml': 'c' * 40, 'config/d.toml': 'd' * 40}
+        cfg = settings()
+        cfg['context'] = {'include': ['config/*.toml']}
+        cfg['limits'].update(context_chars=200, max_context_files=2)
+        data = self.collect_with(files, contents, cfg, list(contents), prior=['src/old.py'])
+        self.assertEqual([entry['path'] for entry in data['context']], ['config/a.toml', 'config/c.toml'])
+        self.assertEqual(data['omitted'], [{'path': 'src/old.py', 'reason': 'context_unavailable'},
+                                           {'path': 'config/big.toml', 'reason': 'context_budget'},
+                                           {'path': 'config/d.toml', 'reason': 'context_file_limit'}])
+
+    def test_related_omissions_are_bounded_with_one_aggregate_record(self):
+        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
+        siblings = [f'src/m{index:02}.py' for index in range(30)]
+        contents = {name: 'value = 1\n' for name in ['src/a.py'] + siblings}
+        cfg = settings()
+        cfg['context'] = {}
+        cfg['limits']['max_context_files'] = 2
+        data = self.collect_with(files, contents, cfg, list(contents))
+        self.assertEqual([entry['path'] for entry in data['context']], siblings[:2])
+        self.assertEqual(data['omitted'], [{'path': name, 'reason': 'context_file_limit'} for name in siblings[2:22]]
+                         + [{'path': '<related-context>', 'reason': 'related_context_omitted_additional'}])
+
+    def test_omission_records_stay_within_the_packet_budget(self):
+        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
+        cfg = settings()
+        cfg['context'] = {'include': ['config/*']}
+        size = len(json.dumps(self.collect_with(files, {}, cfg, [])))
+        cfg['limits']['packet_chars'] = size + 14000
+        # Each unreadable include produces a record of about 440 characters.
+        missing = [f'config/{"n" * 400}{index:02}.toml' for index in range(40)]
+        data = self.collect_with(files, {}, cfg, missing)
+        recorded = [item for item in data['omitted'] if item['path'] in missing]
+        self.assertTrue(0 < len(recorded) < len(missing))
+        # Records also consume packet space, so later includes become budget misses.
+        self.assertEqual({item['reason'] for item in recorded}, {'context_unavailable', 'context_budget'})
+        self.assertEqual(data['omitted'][-1], {'path': '<omitted>', 'reason': 'omission_metadata_exceeds_budget'})
+        self.assertLessEqual(len(json.dumps(data)), cfg['limits']['packet_chars'])
+
+    def test_large_source_file_is_bounded_by_budget_not_a_fixed_cap(self):
+        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
+        contents = {'src/a.py': 'x' * 150000}
+        data = self.collect_with(files, contents, settings(), list(contents))
+        self.assertEqual(data['files'][0]['head_text'], 'x' * 150000)
+        oversized = {'type': 'file', 'encoding': 'base64', 'content': base64.b64encode(b'x' * 1000001).decode()}
+        reader = context.Reader(REPO, 10, lambda *args: oversized)
+        # The absolute ceiling applies even when a caller passes a larger budget.
+        with self.assertRaisesRegex(core.ReviewError, 'context_budget'):
+            reader.text('src/a.py', HEAD, max_chars=5000000)
+
     def test_changed_snapshot_is_rejected(self):
         def api(repo, path):
             if path == 'pulls/7':

@@ -14,6 +14,11 @@ from .core import ReviewError, digest, github, safe_path
 TEXT_SUFFIXES = {'.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.rs', '.go',
                  '.java', '.kt', '.swift', '.c', '.h', '.cpp', '.cs', '.rb', '.sh',
                  '.yml', '.yaml', '.json', '.toml', '.md', '.sql', '.css', '.html'}
+# The remaining budget bounds each file. This absolute ceiling sits near the 1 MB
+# limit up to which the contents API returns base64 file content.
+MAX_TEXT_CHARS = 1000000
+# Individually named related-context omissions before one aggregate record.
+RELATED_OMISSION_RECORDS = 20
 
 
 def identity(pr):
@@ -42,18 +47,27 @@ class Reader:
         self.cache[path] = value
         return value
 
-    def text(self, path, sha, max_chars=120000):
+    def text(self, path, sha, max_chars=MAX_TEXT_CHARS):
+        """Return UTF-8 text or None when unreadable; raise when it exceeds max_chars."""
+        max_chars = min(max_chars, MAX_TEXT_CHARS)
         if not safe_path(path):
             return None
         content = self.get(f'contents/{quote(path, safe="/")}?ref={sha}')
         if (not isinstance(content, dict) or content.get('type') != 'file'
-                or content.get('encoding') != 'base64' or content.get('size', 0) > max_chars * 4):
+                or content.get('encoding') != 'base64'):
             return None
+        # UTF-8 uses at most four bytes per character.
+        if content.get('size', 0) > max_chars * 4:
+            raise ReviewError('context_budget')
         try:
             value = base64.b64decode(content['content']).decode('utf-8')
-            return value if len(value) <= max_chars and '\x00' not in value else None
         except (KeyError, ValueError, UnicodeError):
             return None
+        if '\x00' in value:
+            return None
+        if len(value) > max_chars:
+            raise ReviewError('context_budget')
+        return value
 
 
 def incremental(reader, baseline, pr, config_id, force_full):
@@ -74,6 +88,14 @@ def incremental(reader, baseline, pr, config_id, force_full):
         return [f['filename'] for f in files] + [f['previous_filename'] for f in files if 'previous_filename' in f], 'incremental'
     except (ReviewError, KeyError, TypeError):
         return None, 'comparison_unavailable'
+
+
+def change_size(item):
+    """Count changed lines from GitHub's file counts, or from the patch itself."""
+    counts = (item.get('additions'), item.get('deletions'))
+    if all(type(count) is int and count >= 0 for count in counts):
+        return sum(counts)
+    return sum(1 for line in item['patch'].splitlines() if line.startswith(('+', '-')))
 
 
 def related_candidates(paths, entries, tree, context):
@@ -136,6 +158,7 @@ def collect(repo, number, pr, config, state, force_full=False, api=github):
     packet['rules'] = selected_rules(config, paths)
     packet['expected_changed_files'] = pr['changed_files']
     # Diffs take priority over optional context. Never truncate a patch mid-hunk.
+    changes = {}
     for item in items:
         path = item['filename']
         if not safe_path(path) or not item.get('patch'):
@@ -149,8 +172,10 @@ def collect(repo, number, pr, config, state, force_full=False, api=github):
             packet['omitted'].append({'path': path[:500], 'reason': 'packet_budget'})
             continue
         packet['files'].append(entry)
+        changes[path] = change_size(item)
     context_used = 0
     trees = {}
+    overflow = False
 
     def source_tree(sha):
         if sha not in trees:
@@ -160,66 +185,104 @@ def collect(repo, number, pr, config, state, force_full=False, api=github):
                 trees[sha] = {'tree': [], 'unavailable': True}
         return trees[sha]
 
+    def omit(path, reason):
+        """Record one omission while its metadata fits the packet budget."""
+        nonlocal overflow
+        record = {'path': path[:500], 'reason': reason}
+        # Source text stops 12,000 characters short of packet_chars. Records use that
+        # margin; the last 4,000 remain for aggregate markers and lane metadata.
+        if overflow or len(json.dumps(packet)) + len(json.dumps(record)) + 2 > limits['packet_chars'] - 4000:
+            overflow = True
+        else:
+            packet['omitted'].append(record)
+
     def add_text(target, key, path, sha):
+        """Admit one immutable source text; return None or why it was not admitted."""
         nonlocal context_used
         available = min(limits['context_chars'] - context_used,
-                        limits['packet_chars'] - 4000 - len(json.dumps(packet)))
+                        limits['packet_chars'] - 12000 - len(json.dumps(packet)))
         if available <= 2:
-            return False
+            return 'context_budget'
         try:
             tree = source_tree(sha)
             size = next((item.get('size') for item in tree.get('tree', []) if item['path'] == path), None)
             # JSON with ASCII escaping cannot be smaller than the UTF-8 source.
             # Tree sizes let us skip downloads that cannot fit the remaining budget.
             if type(size) is int and size + 2 > available:
-                return False
-            value = reader.text(path, sha, max_chars=min(120000, available - 2))
-        except ReviewError:
-            value = None
+                return 'context_budget'
+            value = reader.text(path, sha, max_chars=available - 2)
+        except ReviewError as error:
+            return str(error) if str(error) in ('context_budget', 'context_api_budget') else 'context_unavailable'
         if value is None:
-            return False
+            return 'context_unavailable'
         cost = len(json.dumps(value))
-        if context_used + cost > limits['context_chars'] or len(json.dumps(packet)) + cost > limits['packet_chars'] - 4000:
-            return False
+        if context_used + cost > limits['context_chars'] or len(json.dumps(packet)) + cost > limits['packet_chars'] - 12000:
+            return 'context_budget'
         target[key] = value
         context_used += cost
-        return True
+        return None
+
+    def admit(path, reason):
+        """Add one non-changed file to the context; return None or why it was omitted."""
+        if len(packet['context']) >= limits['max_context_files']:
+            return 'context_file_limit'
+        entry = {'path': path, 'reason': reason}
+        failure = add_text(entry, 'head_text', path, head)
+        if not failure:
+            packet['context'].append(entry)
+        return failure
 
     try:
         comparison = reader.get(f'compare/{base}...{head}')
         merge_base = comparison['merge_base_commit']['sha']
     except (ReviewError, KeyError, TypeError):
         merge_base = None
-        packet['omitted'].append({'path': '<base-context>', 'reason': 'merge_base_unavailable'})
-    for entry in packet['files']:
-        if entry['status'] != 'removed':
-            if not add_text(entry, 'head_text', entry['path'], head):
-                packet['omitted'].append({'path': entry['path'], 'reason': 'head_text_unavailable_or_budget'})
-    # Complete current changed-file evidence before spending on old versions.
-    for entry in packet['files']:
-        if merge_base and entry['status'] != 'added':
-            if not add_text(entry, 'base_text', entry.get('previous_filename', entry['path']), merge_base):
-                packet['omitted'].append({'path': entry['path'], 'reason': 'base_text_unavailable_or_budget'})
+        omit('<base-context>', 'merge_base_unavailable')
+    # Larger changes usually carry the PR's core logic, so their source is admitted
+    # first. The sort is stable for equal sizes; packet['files'] keeps the API order.
+    ordered = sorted(packet['files'], key=lambda entry: -changes[entry['path']])
+    for entry in ordered:
+        if entry['status'] != 'removed' and add_text(entry, 'head_text', entry['path'], head):
+            omit(entry['path'], 'head_text_unavailable_or_budget')
+    candidates = []
     try:
         tree = source_tree(head)
         if tree.get('unavailable'):
-            packet['omitted'].append({'path': '<tree>', 'reason': 'tree_unavailable'})
+            omit('<tree>', 'tree_unavailable')
         if tree.get('truncated'):
-            packet['omitted'].append({'path': '<tree>', 'reason': 'tree_truncated'})
+            omit('<tree>', 'tree_truncated')
         candidates = related_candidates(paths, packet['files'], tree.get('tree', []), config['context'])
-        # Old findings remain evidence requests even when their file left the diff.
-        prior_paths = [finding['path'] for finding in state['findings'].values() if finding['status'] != 'fixed' and finding['path'] not in paths]
-        candidates = [(p, 'previous_finding') for p in prior_paths] + candidates
-        seen = set(paths)
-        for path, reason in candidates:
-            if path in seen or len(packet['context']) >= limits['max_context_files']:
-                continue
-            seen.add(path)
-            entry = {'path': path, 'reason': reason}
-            if add_text(entry, 'head_text', path, head):
-                packet['context'].append(entry)
     except ReviewError:
-        packet['omitted'].append({'path': '<related-context>', 'reason': 'context_unavailable_or_budget'})
+        omit('<related-context>', 'context_unavailable_or_budget')
+    # Old findings remain evidence requests even when their file left the diff.
+    prior_paths = [finding['path'] for finding in state['findings'].values() if finding['status'] != 'fixed' and finding['path'] not in paths]
+    explicit = [(path, 'previous_finding') for path in prior_paths]
+    explicit += [(path, reason) for path, reason in candidates if reason == 'configured_context']
+    seen = set(paths)
+    # Requested context precedes old versions and heuristic neighbors; report every miss.
+    for path, reason in explicit:
+        if path not in seen:
+            seen.add(path)
+            if failure := admit(path, reason):
+                omit(path, failure)
+    # Old versions of changed files follow current and explicitly requested source.
+    for entry in ordered:
+        if merge_base and entry['status'] != 'added':
+            if add_text(entry, 'base_text', entry.get('previous_filename', entry['path']), merge_base):
+                omit(entry['path'], 'base_text_unavailable_or_budget')
+    related_omitted = 0
+    for path, reason in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if failure := admit(path, reason):
+            related_omitted += 1
+            if related_omitted <= RELATED_OMISSION_RECORDS:
+                omit(path, failure)
+    if related_omitted > RELATED_OMISSION_RECORDS:
+        omit('<related-context>', 'related_context_omitted_additional')
+    if overflow:
+        packet['omitted'].append({'path': '<omitted>', 'reason': 'omission_metadata_exceeds_budget'})
     for lane in packet['lanes'].values():
         if lane['paths'] is not None and lane['paths']:
             # A dependency-only update can affect an unchanged PR hunk.
