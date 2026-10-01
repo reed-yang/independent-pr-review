@@ -3,7 +3,11 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -158,6 +162,103 @@ class AgyReleaseTests(unittest.TestCase):
                 agy_release.fetch("http://example.com/a", 10)
             opened.assert_not_called()
         self.assertEqual(failure.exception.code, "release_url_not_https")
+
+
+FAKE_GH = """#!{python}
+import json, os, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\\n")
+option = lambda name: args[args.index(name) + 1] if name in args else None
+prs = json.load(open(os.environ["FAKE_PRS"]))
+if args[:2] == ["pr", "list"]:
+    data = [pr for pr in prs if pr["state"] == option("--state")]
+elif args[:2] == ["pr", "view"]:
+    data = next(pr for pr in prs if str(pr["number"]) == args[2])
+else:
+    sys.exit(0)
+fields = option("--json").split(",")
+project = lambda pr: {{key: pr[key] for key in fields}}
+data = [project(pr) for pr in data] if isinstance(data, list) else project(data)
+# The real jq evaluates the workflow's --jq expression, as gh does.
+sys.stdout.write(subprocess.run(["jq", "-r", option("--jq")], input=json.dumps(data),
+                                capture_output=True, text=True, check=True).stdout)
+"""
+
+FAKE_GIT = """#!{python}
+import os, sys
+args = sys.argv[1:]
+while args[:1] == ["-c"]:
+    args = args[2:]
+tip = os.environ["FAKE_TIP"]
+if args[0] == "ls-remote":
+    if not os.path.exists(tip):
+        sys.exit(2)
+    ref = args[-1] if args[-1].startswith("refs/") else "refs/heads/" + args[-1]
+    print(open(tip).read().strip() + "\\t" + ref)
+elif args[0] == "push":
+    open(tip, "w").write("1" * 40)
+"""
+
+
+@unittest.skipUnless(shutil.which("jq") and shutil.which("bash"), "jq and bash are required")
+class ReleaseWatchWorkflowTests(unittest.TestCase):
+    def step_script(self, name):
+        lines = (ROOT / ".github/workflows/agy-release-watch.yml").read_text().splitlines()
+        start = lines.index("      - name: " + name)
+        run = next(index for index in range(start, len(lines)) if lines[index].strip() == "run: |")
+        indent = len(lines[run]) - len(lines[run].lstrip()) + 2
+        body = []
+        for line in lines[run + 1:]:
+            if line.strip() and len(line) - len(line.lstrip()) < indent:
+                break
+            body.append(line[indent:])
+        return "\n".join(body) + "\n"
+
+    def run_step(self, prs, branch_tip=None):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        temp = Path(directory.name)
+        bin_dir = temp / "bin"
+        bin_dir.mkdir()
+        for name, source in (("gh", FAKE_GH), ("git", FAKE_GIT), ("base64", "#!/bin/sh\ncat >/dev/null\necho Zml4dHVyZQ==\n")):
+            (bin_dir / name).write_text(source.format(python=sys.executable) if name != "base64" else source)
+            (bin_dir / name).chmod(0o755)
+        (temp / "prs.json").write_text(json.dumps(prs))
+        if branch_tip:
+            (temp / "tip").write_text(branch_tip)
+        (temp / "agy-update.json").write_text(json.dumps({
+            "latest": "9.9.9", "pinned": "1.2.14", "native_step_cap_matches": 1,
+            "platforms": {"linux_amd64": {"version": "9.9.9", "sha512": "0" * 128, "archive_bytes": 1}}}))
+        (temp / "agy-tests.log").write_text("Ran 1 test in 0.1s\n\nOK\n")
+        (temp / "step.sh").write_text(self.step_script("Create or update the release PR"))
+        env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"], "RUNNER_TEMP": str(temp),
+               "GH_TOKEN": "fixture", "GH_REPO": "owner/engine", "AGY_VERSION": "9.9.9", "BASE_BRANCH": "main",
+               "RUN_URL": "https://github.com/owner/engine/actions/runs/1", "GITHUB_SERVER_URL": "https://github.com",
+               "GITHUB_SHA": "a" * 40, "FAKE_LOG": str(temp / "calls.log"), "FAKE_PRS": str(temp / "prs.json"),
+               "FAKE_TIP": str(temp / "tip")}
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(temp / "step.sh")],
+                                env=env, capture_output=True, text=True, timeout=30)
+        log = temp / "calls.log"
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return result, [call[:3] for call in calls if call[:2] in (["pr", "create"], ["pr", "edit"])]
+
+    def test_release_pr_lookup_ignores_fork_heads_and_stale_pr_heads(self):
+        fork = {"isCrossRepository": True, "headRefOid": "f" * 40}
+        own = {"isCrossRepository": False}
+        cases = [
+            # A closed fork PR with the same branch name must not suppress the official PR.
+            ("closed_fork", [{"number": 5, "state": "closed", **fork}], None, 0, [["pr", "create", "--base"]]),
+            # An open fork PR must never receive the bot's evidence body.
+            ("open_fork", [{"number": 6, "state": "open", **fork}], None, 0, [["pr", "create", "--base"]]),
+            ("stale_head", [{"number": 7, "state": "open", "headRefOid": "e" * 40, **own}], "1" * 40, 1, []),
+            ("current_head", [{"number": 7, "state": "open", "headRefOid": "1" * 40, **own}], "1" * 40, 0, [["pr", "edit", "7"]]),
+        ]
+        for name, prs, tip, code, writes in cases:
+            with self.subTest(case=name):
+                result, calls = self.run_step(prs, tip)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertEqual(calls, writes)
 
 
 if __name__ == "__main__":

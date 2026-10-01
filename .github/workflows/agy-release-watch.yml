@@ -53,8 +53,10 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           branch="chore/agy-$AGY_VERSION"
-          number=$(gh pr list --head "$branch" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number // empty')
-          closed=$(gh pr list --head "$branch" --base "$BASE_BRANCH" --state closed --json number --jq '.[0].number // empty')
+          # --head ignores the owner; a fork PR can reuse this branch name.
+          own='[.[] | select(.isCrossRepository | not)][0].number // empty'
+          number=$(gh pr list --head "$branch" --base "$BASE_BRANCH" --state open --json number,isCrossRepository --jq "$own")
+          closed=$(gh pr list --head "$branch" --base "$BASE_BRANCH" --state closed --json number,isCrossRepository --jq "$own")
           if [ -z "$number" ] && [ -n "$closed" ]; then
             echo "::notice::PR #$closed for $branch was closed; reopen it manually to resume this version."
             exit 0
@@ -92,6 +94,12 @@ jobs:
           print('\n'.join(lines))
           PY
           if [ -n "$number" ]; then
+            tip=$(git "${auth[@]}" ls-remote --exit-code origin "refs/heads/$branch" | cut -f1)
+            head=$(gh pr view "$number" --json headRefOid --jq .headRefOid)
+            if [ "$head" != "$tip" ]; then
+              echo "::error::PR #$number head $head is not the $branch tip $tip; its body was left unchanged."
+              exit 1
+            fi
             gh pr edit "$number" --body-file "$RUNNER_TEMP/agy-pr.md"
           else
             gh pr create --base "$BASE_BRANCH" --head "$branch" --title "chore(agy): pin official agy $AGY_VERSION" \

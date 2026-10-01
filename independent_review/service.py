@@ -138,6 +138,14 @@ def fit_packet(packet, backend, candidates=None):
             value['files'].remove(optional)
             omit(optional['path'], 'diff_lane_budget')
             continue
+        # Last resort: keep candidate patches but drop their current text. Evidence
+        # found only in that text then resolves as uncertain.
+        largest = max((entry for entry in value['files'] if entry.get('head_text')),
+                      key=lambda entry: len(entry['head_text']), default=None)
+        if largest:
+            largest['head_text'] = None
+            omit(largest['path'], 'head_text_lane_budget')
+            continue
         raise ReviewError('required_evidence_exceeds_lane_context')
     # Include omission metadata in the final check; it is evidence too.
     if estimate_tokens(prompt()) > settings['input_budget_tokens']:
@@ -191,7 +199,14 @@ def run(bundle, runners=None):
             if lane['paths'] is not None:
                 data['files'] = [entry for entry in packet['files'] if entry['path'] in lane['paths'] or entry.get('previous_filename') in lane['paths']]
             backend = config['backends']['backends'][slot['backends'][0]]
-            data, lane_coverage[slot['id']] = fit_packet(data, backend)
+            try:
+                data, lane_coverage[slot['id']] = fit_packet(data, backend)
+            except ReviewError as exc:
+                # An input this lane cannot hold fails only this lane; the other lane continues.
+                reviews.append({'slot': slot['id'], 'opinion_family': slot['opinion_family'], 'status': 'failed',
+                                'error': str(exc), 'findings': [], 'scope': lane['reason'],
+                                'attempts': [{'status': 'failed', 'error': str(exc), 'stage': 'input'}]})
+                continue
             if not data['files']:
                 reviews.append({'slot': slot['id'], 'status': 'skipped', 'findings': [], 'scope': 'no_reviewable_changed_text'})
                 continue
@@ -202,6 +217,12 @@ def run(bundle, runners=None):
                 review = futures[slot['id']].result()
                 review['scope'] = packet['lanes'][slot['id']]['reason']
                 review['input_context'] = lane_coverage[slot['id']]
+                # A lane that did not receive every changed diff is not a complete review.
+                if review['status'] in ('completed', 'partial') and any(
+                        item['reason'] == 'diff_lane_budget' for item in lane_coverage[slot['id']]['omitted']):
+                    review.setdefault('attempts', []).append({'status': 'partial', 'error': 'lane_diff_omitted', 'stage': 'input'})
+                    if review['status'] == 'completed':
+                        review.update(status='partial', error='lane_diff_omitted')
                 reviews.append(review)
     reviews.sort(key=lambda value: next(i for i, slot in enumerate(slots) if slot['id'] == value['slot']))
     accounted = sum(usage_tokens(review.get('usage'), lane_coverage[review['slot']]['estimated_prompt_tokens'] +

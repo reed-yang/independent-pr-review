@@ -57,10 +57,11 @@ then imports, related tests and sibling modules. Each file is bounded by the rem
 budget, with a 1,000,000-character ceiling near the contents API limit. This is
 deterministic retrieval, not a complete semantic index or arbitrary repository
 browsing. Missing/truncated files, API limits and packet limits are explicit: each
-unadmitted requested file is recorded with a reason (`context_budget`,
-`context_unavailable`, `context_api_budget` or `context_file_limit`); other related
-files are listed up to 20, then one aggregate record. Records share the packet budget;
-if they no longer fit, one `omission_metadata_exceeds_budget` marker replaces the rest.
+unadmitted previous-finding file is recorded with a reason (`context_budget`,
+`context_unavailable`, `context_api_budget` or `context_file_limit`); configured
+includes and other related files share 20 individual records, then one aggregate
+record. Records share the packet budget; if they no longer fit, one
+`omission_metadata_exceeds_budget` marker replaces the rest.
 Source is data and never executed.
 
 Initial opinions are independent. Up to ten combined candidates or previous issues
@@ -95,13 +96,17 @@ subscription usage is not assigned an invented dollar cost.
 Each provider has an explicit effort and context window. Preparation records their
 resolved values in the configuration identity; a change invalidates old cache reuse.
 Generation and verification project the shared packet separately for that provider,
-preserving whole diffs and requested verification evidence. Optional source is
-trimmed first; an irreducible oversized verification packet fails without calling a
-model. Native agy input is also capped at the per-user-input-step limit recorded in
-`agy-release.json` (64,000 estimated tokens) minus a 4,000-token wrapper reserve;
-the configured model window is still reported as the window. Reports retain
-lane-specific omissions and estimated prompt sizes; compact signed cache entries
-keep omission counts instead of unbounded path lists.
+never cutting a diff hunk. Optional source is trimmed first, then whole non-candidate
+diffs; a generation lane that loses a changed diff this way stays partial with
+`lane_diff_omitted`, so its baseline does not advance. As a last resort verification
+drops a candidate file's current text but keeps its patch (`head_text_lane_budget`);
+evidence found only in that text resolves as uncertain. A projection that still does
+not fit fails that lane or batch at stage `input` without calling a model, while the
+other lane continues. Native agy input is also capped at the per-user-input-step
+limit recorded in `agy-release.json` (64,000 estimated tokens) minus a 4,000-token
+wrapper reserve; the configured model window is still reported as the window.
+Reports retain lane-specific omissions and estimated prompt sizes; compact signed
+cache entries keep omission counts instead of unbounded path lists.
 
 The larger collector ceiling is 4M characters, not 4M tokens. Estimates use UTF-8
 bytes/3 with at least a ten-percent window reserve, not a provider tokenizer.

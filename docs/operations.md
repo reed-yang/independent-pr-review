@@ -33,6 +33,8 @@ snapshot clears transient failure notes without refunding consumed run budget.
 | `provider_stream_error` with `incomplete_reason` | The upstream explicitly ended the response as incomplete. Inspect the allowlisted reason and numeric `provider_usage`, including `reasoning_tokens`; partial text is never accepted as a completed review. `max_output_tokens` semantics differ across providers and must not be assumed to bound internal reasoning. |
 | `provider_dns_error`, `provider_tls_error`, `provider_connection_error` | Check the configured gateway/network. Diagnostics never contain raw exceptions, headers, response bodies or credentials. |
 | `input_end_nonce_missing`, `input_end_nonce_mismatch` | The model did not echo the per-call end-of-input nonce, so it may have seen only a prefix of its input; native agy truncates an oversized input step without failing. Evidence-checked candidates and decisions are kept, but the lane or verification batch stays partial and no baseline advances. Compare the lane's estimated input with the native step cap in result.md; repeated failures on small inputs mean the model ignored the output contract. |
+| `lane_diff_omitted` | The lane's input budget (for native agy, the step cap) could not hold every changed-file diff, so whole diffs were left out (`diff_lane_budget` in result.json). Its findings are kept, but the lane stays partial and its baseline does not advance, so later incremental runs still cover those files. Reduce the changed text per PR. |
+| `required_evidence_exceeds_lane_context`, `packet_metadata_exceeds_lane_context` | Required diffs, PR metadata or omission records exceed that lane's input budget after optional source was dropped. That lane or verification batch fails at stage `input` without a model call; the other lane's result is kept and the run is partial. |
 | Rejected candidate or verification evidence | Inspect its redacted, bounded quote preview and reason in result.json. Literal contiguous diff-side quotes are accepted without diff markers. Invalid generation candidates are excluded; invalid verification decisions become uncertain. Valid siblings are retained, but the review remains partial and cannot advance a successful baseline. Copy contiguous source quotes exactly, preserving line breaks; use a short decisive quote instead of joining locations. |
 | `agy_error_<status>`, `agy_error_unclassified` | agy (1.2.6+) ended the turn with a structured `AGY_ERROR` line, normally exit code 3; the code keeps only its canonical status, for example `agy_error_resource_exhausted`. Diagnostics keep `retryable`, `code_kind` and a numeric `error_code`; message text and error IDs are discarded. `retryable` is informational and triggers no automatic retry. Check the account's quota/model access, then retry within the budget. |
 | `agy_authentication_required`, refresh rotation | Log in interactively and resync encrypted OAuth; do not paste tokens in comments. |
@@ -98,8 +100,10 @@ qualified 64000-token `MaxTokensPerUserInputStep`; a miss fails with
 manifests with different artifacts, or older manifests, also fail for human review.
 After the provider-free checks pass, the job creates or updates branch
 `chore/agy-<version>` and its PR, leaving an existing branch's commits unchanged; a
-closed PR for that version is respected until reopened manually. Allow
-GitHub Actions to create pull requests in the repository settings. PRs created with
+closed PR for that version is respected until reopened manually. Only same-repository
+PRs count, since fork PRs can reuse the branch name, and an open PR's body is updated
+only while its head is the branch tip. Allow GitHub Actions to create pull requests
+in the repository settings. PRs created with
 `GITHUB_TOKEN` trigger no other workflows, so the PR body records this job's evidence;
 dispatch `Harness checks` on the branch when CI on its head is needed. The tracking
 flow is: watch PR, review (agy changelog, runner compatibility), merge and engine

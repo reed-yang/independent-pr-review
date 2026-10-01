@@ -259,18 +259,23 @@ def collect(repo, number, pr, config, state, force_full=False, api=github):
     explicit = [(path, 'previous_finding') for path in prior_paths]
     explicit += [(path, reason) for path, reason in candidates if reason == 'configured_context']
     seen = set(paths)
-    # Requested context precedes old versions and heuristic neighbors; report every miss.
+    # Requested context precedes old versions and heuristic neighbors. Every
+    # previous-finding miss is recorded; configured includes share the related bound.
+    related_omitted = 0
     for path, reason in explicit:
         if path not in seen:
             seen.add(path)
             if failure := admit(path, reason):
+                if reason == 'configured_context':
+                    related_omitted += 1
+                    if related_omitted > RELATED_OMISSION_RECORDS:
+                        continue
                 omit(path, failure)
     # Old versions of changed files follow current and explicitly requested source.
     for entry in ordered:
         if merge_base and entry['status'] != 'added':
             if add_text(entry, 'base_text', entry.get('previous_filename', entry['path']), merge_base):
                 omit(entry['path'], 'base_text_unavailable_or_budget')
-    related_omitted = 0
     for path, reason in candidates:
         if path in seen:
             continue

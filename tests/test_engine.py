@@ -284,17 +284,29 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(data['omitted'], [{'path': name, 'reason': 'context_file_limit'} for name in siblings[2:22]]
                          + [{'path': '<related-context>', 'reason': 'related_context_omitted_additional'}])
 
+    def test_configured_include_omissions_share_the_related_record_bound(self):
+        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
+        missing = [f'config/m{index:02}.toml' for index in range(30)]
+        cfg = settings()
+        cfg['context'] = {'include': ['config/*']}
+        data = self.collect_with(files, {'src/a.py': 'x'}, cfg, missing, prior=['src/old.py'])
+        # Previous-finding misses stay individual; configured includes are capped.
+        self.assertEqual(data['omitted'], [{'path': 'src/old.py', 'reason': 'context_unavailable'}]
+                         + [{'path': name, 'reason': 'context_unavailable'} for name in missing[:context.RELATED_OMISSION_RECORDS]]
+                         + [{'path': '<related-context>', 'reason': 'related_context_omitted_additional'}])
+
     def test_omission_records_stay_within_the_packet_budget(self):
         files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
         cfg = settings()
         cfg['context'] = {'include': ['config/*']}
         size = len(json.dumps(self.collect_with(files, {}, cfg, [])))
-        cfg['limits']['packet_chars'] = size + 14000
-        # Each unreadable include produces a record of about 440 characters.
-        missing = [f'config/{"n" * 400}{index:02}.toml' for index in range(40)]
+        cfg['limits']['packet_chars'] = size + 13000
+        # Each unreadable include produces a record of about 540 characters, so the
+        # packet budget binds before the individual-record bound does.
+        missing = [f'config/{"n" * 480}{index:02}.toml' for index in range(40)]
         data = self.collect_with(files, {}, cfg, missing)
         recorded = [item for item in data['omitted'] if item['path'] in missing]
-        self.assertTrue(0 < len(recorded) < len(missing))
+        self.assertTrue(0 < len(recorded) < context.RELATED_OMISSION_RECORDS)
         # Records also consume packet space, so later includes become budget misses.
         self.assertEqual({item['reason'] for item in recorded}, {'context_unavailable', 'context_budget'})
         self.assertEqual(data['omitted'][-1], {'path': '<omitted>', 'reason': 'omission_metadata_exceeds_budget'})
@@ -532,11 +544,64 @@ class ContextWindowTests(unittest.TestCase):
         self.assertIn('Native agy input step cap: input limited to 60,000 estimated tokens; the configured model window remains 1,048,576.', rendered)
         self.assertEqual(rendered.count('Native agy input step cap'), 1)
 
+    def test_native_lane_that_drops_a_changed_diff_stays_partial(self):
+        data = bundle()
+        data['packet']['files'].append({'path': 'src/big.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+' + 'x' * 200000,
+                                        'head_text': None, 'base_text': None})
+        with patch.dict(os.environ, {}, clear=True):
+            result = service.run(data, echo_input_end({name: lambda *args: (answer(), 'model', {'total_tokens': 10})
+                                                       for name in core.HARNESSES}))
+        lanes = {lane['slot']: lane for lane in result['reviews']}
+        self.assertIn({'path': 'src/big.py', 'reason': 'diff_lane_budget'}, lanes['Gemini']['input_context']['omitted'])
+        self.assertEqual((lanes['Gemini']['status'], lanes['Gemini']['error']), ('partial', 'lane_diff_omitted'))
+        self.assertEqual((lanes['Grok']['status'], result['status']), ('completed', 'partial'))
+        reserved = state.reserve(data['state'], data, '1:1', 'url')
+        accepted = state.accept(reserved, result, '1:1')
+        # Only the lane that received every changed diff advances its baseline.
+        self.assertEqual(set(accepted['lanes']), {'Grok'})
+        gemini = next(lane for lane in accepted['last_reviews'] if lane['slot'] == 'Gemini')
+        self.assertEqual(gemini['errors'], ['lane_diff_omitted'])
+        self.assertEqual(gemini['failure_notes'], [core.failure_description({'error': 'lane_diff_omitted'})])
+        self.assertTrue(gemini['failure_notes'][0])
+
+    def test_lane_input_projection_error_fails_only_that_lane(self):
+        data = bundle()
+        # Required packet metadata alone exceeds the native agy step but fits Grok.
+        data['packet']['description'] = 'x' * 300000
+        def grok(backend, prompt):
+            return answer([candidate()]), 'grok-test', {'total_tokens': 10}
+        def gemini(backend, prompt):
+            raise AssertionError('An input that cannot be projected must not be sent')
+        with patch.dict(os.environ, {}, clear=True):
+            result = service.run(data, echo_input_end({'compatible_packet': grok, 'antigravity_packet': gemini}))
+        lanes = {lane['slot']: lane for lane in result['reviews']}
+        code = 'required_evidence_exceeds_lane_context'
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual((lanes['Gemini']['status'], lanes['Gemini']['error']), ('failed', code))
+        self.assertEqual(lanes['Gemini']['attempts'], [{'status': 'failed', 'error': code, 'stage': 'input'}])
+        self.assertEqual([finding['path'] for finding in lanes['Grok']['findings']], ['src/a.py'])
+        # The verification projection fails the same way; the candidate stays uncertain.
+        self.assertEqual([(item['slot'], item['status'], item['error']) for item in result['verifications']],
+                         [('Gemini', 'failed', code)])
+        self.assertEqual(result['findings'][0]['status'], 'uncertain')
+
     def test_required_verification_evidence_is_not_silently_removed(self):
         data = packet()
         data['files'][0]['patch'] = '@@ -0,0 +1 @@\n+' + 'x' * 2000000
         with self.assertRaisesRegex(core.ReviewError, 'required_evidence_exceeds'):
             service.fit_packet(data, {'harness': 'compatible_packet', 'default_context_window_tokens': 500000}, [candidate()])
+
+    def test_oversized_candidate_head_text_is_dropped_before_failing(self):
+        data = packet()
+        data['files'][0]['head_text'] += 'x' * 200000
+        native = {'harness': 'antigravity_packet', 'default_context_window_tokens': 1048576, 'default_effort': 'medium'}
+        with patch.dict(os.environ, {}, clear=True):
+            projected, meta = service.fit_packet(data, native, [candidate()])
+        # The patch still carries the candidate's evidence; only the current text goes.
+        self.assertEqual(projected['files'][0]['patch'], data['files'][0]['patch'])
+        self.assertIsNone(projected['files'][0]['head_text'])
+        self.assertIn({'path': 'src/a.py', 'reason': 'head_text_lane_budget'}, meta['omitted'])
+        self.assertLessEqual(meta['estimated_prompt_tokens'], meta['input_budget_tokens'])
 
     def test_known_model_limits_and_native_effort_mismatch_fail_closed(self):
         backend = {'model_env': 'MODEL', 'effort_env': 'EFFORT', 'context_window_env': 'WINDOW', 'harness': 'compatible_packet'}
