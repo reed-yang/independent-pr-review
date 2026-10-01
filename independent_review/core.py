@@ -272,7 +272,7 @@ def run_agy(backend, prompt):
                 install(binary)
         return run(backend, prompt)
     except AgyError as exc:
-        raise ReviewError(str(exc)) from None
+        raise ReviewError(str(exc), exc.diagnostics) from None
     except (OSError, ValueError):
         raise ReviewError("agy_local_state_failed") from None
 
