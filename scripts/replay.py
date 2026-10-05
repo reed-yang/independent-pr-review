@@ -3,6 +3,10 @@
 The brief and snapshot come from a local clone; generation, verification and
 combination run exactly as in Actions. Nothing is published. With --fake, a
 provider-free scripted runner exercises the pipeline end to end.
+
+On macOS a sandboxed Codex command can read the launch environment of any
+same-user process, so provider keys must not be exported to this script when
+the Codex lane runs; --keychain-service reads them into this process instead.
 """
 
 import argparse
@@ -47,6 +51,25 @@ def pr_files(repo, merge_base, head):
     return items
 
 
+def load_keys(config, wanted, service_name):
+    """Read each selected lane's provider key from the macOS Keychain into this process only."""
+    backends = [config['backends']['backends'][slot['backends'][0]]
+                for slot in config['backends']['slots'] if slot['id'] in wanted]
+    names = [backend['key_env'] for backend in backends if backend.get('key_env')]
+    exposed = [name for name in names if os.environ.get(name)]
+    if sys.platform == 'darwin' and exposed and any(backend['harness'] == 'codex_cli' for backend in backends):
+        sys.exit(f"unset {', '.join(exposed)}: sandboxed Codex commands can read this process's launch environment")
+    keys = {}
+    for name in names if service_name else ():
+        account = name.lower().replace('_', '-')
+        value = subprocess.run(['security', 'find-generic-password', '-s', service_name, '-a', account, '-w'],
+                               capture_output=True, text=True).stdout.strip()
+        if not value:
+            sys.exit(f'no Keychain item for service {service_name} account {account}')
+        keys[name] = value
+    return keys
+
+
 def fake_runner(backend, task, workspace):
     """Return a schema-valid answer echoing the nonce; candidates are verified as uncertain."""
     nonce = task['prompt'].rsplit('END_OF_INPUT_NONCE=', 1)[1].strip()
@@ -75,6 +98,8 @@ def main():
     parser.add_argument('--out', required=True)
     parser.add_argument('--lanes', default='', help='comma-separated lane ids; default all')
     parser.add_argument('--fake', action='store_true')
+    parser.add_argument('--keychain-service', help='read provider keys from this Keychain service '
+                        '(account = key variable in lower case with dashes)')
     args = parser.parse_args()
     repo = str(Path(args.repo).resolve())
     head = git(repo, 'rev-parse', args.head).strip()
@@ -96,6 +121,7 @@ def main():
     save(out / 'bundle.json', bundle)
     slots = config['backends']['slots']
     wanted = set(filter(None, args.lanes.split(','))) or {slot['id'] for slot in slots}
+    keys = {} if args.fake else load_keys(config, wanted, args.keychain_service)
     runners = {name: fake_runner for name in service.ACCESS} if args.fake else None
     work = out / 'work'
 
@@ -114,6 +140,8 @@ def main():
         save(out / f"lane-{slot['id']}.json", review)
         return review
 
+    # The Codex lane takes its key out of the environment on each run, as one Actions job would.
+    os.environ.update(keys)
     with ThreadPoolExecutor(max_workers=len(slots)) as pool:
         reviews = list(pool.map(generate, slots))
 
@@ -124,6 +152,7 @@ def main():
         save(out / f"verify-{slot['id']}.json", result)
         return result
 
+    os.environ.update(keys)
     with ThreadPoolExecutor(max_workers=len(slots)) as pool:
         verifications = [item for item in pool.map(verify, slots) if item['status'] != 'not_needed']
     result = service.combine(bundle, reviews, verifications, open_workspace('combine'))
