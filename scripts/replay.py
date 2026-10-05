@@ -118,6 +118,9 @@ def main():
         reviews = list(pool.map(generate, slots))
 
     def verify(slot):
+        if slot['id'] not in wanted:
+            # A lane that was not selected is never invoked; its candidates stay unverified.
+            return {'slot': slot['id'], 'status': 'not_needed'}
         start = time.monotonic()
         result = service.verify(bundle, slot['id'], reviews, open_workspace('verify-' + slot['id']), runners)
         timings['verify-' + slot['id']] = round(time.monotonic() - start, 1)

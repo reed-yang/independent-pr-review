@@ -69,7 +69,9 @@ def generation_planned(policy, stats, trigger):
         return True, None
     if set(trigger.get('labels', [])) & set(policy.get('labels', [])):
         return True, None
-    if stats['changed_lines'] >= policy.get('min_changed_lines', 0) or stats['changed_files'] >= policy.get('min_changed_files', 0):
+    # Only configured thresholds count; an absent one would otherwise always pass.
+    if any(key in policy and stats[name] >= policy[key] for key, name in
+           (('min_changed_lines', 'changed_lines'), ('min_changed_files', 'changed_files'))):
         return True, None
     return False, 'below_generation_threshold'
 

@@ -176,6 +176,24 @@ def input_end_error(obj, nonce):
     return None if value == nonce else "input_end_nonce_mismatch"
 
 
+def run_agy(backend, prompt):
+    """Run the retained native agy packet adapter; its backend stays disabled until it can read the repository."""
+    from .agy_runner import AgyError, run
+    try:
+        if os.environ.get('AGY_INSTALL_MISSING') == 'true':
+            binary = os.environ.get(backend['binary_env'], '')
+            if not binary or not Path(binary).is_absolute():
+                raise ReviewError('agy_binary_not_found')
+            if not Path(binary).is_file():
+                from .install_agy import install
+                install(binary)
+        return run(backend, prompt)
+    except AgyError as exc:
+        raise ReviewError(str(exc), exc.diagnostics) from None
+    except (OSError, ValueError):
+        raise ReviewError("agy_local_state_failed") from None
+
+
 def failure_description(attempt):
     """Explain known transport outcomes without publishing provider error text."""
     error = attempt.get('error')

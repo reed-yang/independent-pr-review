@@ -107,7 +107,7 @@ def parse_review(raw, brief, sources, nonce):
     valid, rejected = [], []
     for index, finding in enumerate(obj['findings']):
         try:
-            if not isinstance(finding, dict) or finding.get('path') not in sources.changed:
+            if not isinstance(finding, dict) or not isinstance(finding.get('path'), str) or finding['path'] not in sources.changed:
                 raise ReviewError('invalid_finding_location_or_severity')
             if finding.get('severity') not in SEVERITIES:
                 raise ReviewError('invalid_finding_location_or_severity')
@@ -183,6 +183,9 @@ def plan(bundle, reviews, sources):
     """Deterministically select candidates and assign each to the other family."""
     brief, config, prior = bundle['packet'], bundle['config'], bundle['state']
     slots = config['backends']['slots']
+    order = [slot['id'] for slot in slots]
+    # Phases may list lane results in different orders; the plan must not depend on it.
+    reviews = sorted(reviews, key=lambda review: order.index(review['slot']) if review['slot'] in order else len(order))
     candidates = {}
     for review in reviews:
         if review['status'] not in ('completed', 'partial'):
@@ -196,7 +199,8 @@ def plan(bundle, reviews, sources):
                     for entry in brief['files'])
                 if same_path and ''.join(old['evidence'].split()) == ''.join(finding['evidence'].split()) and old.get('scope', '') == finding.get('scope', ''):
                     fid = old_id
-                    finding = {**finding, 'finding_id': fid}
+                    # A rediscovered published finding keeps its protection against dismissal.
+                    finding = {**finding, 'finding_id': fid, 'published': bool(old.get('comment_id'))}
                     break
             if fid not in candidates:
                 candidates[fid] = {**finding, 'sources': [], 'previous': False}
@@ -237,7 +241,8 @@ def parse_decisions(raw, candidates, sources, nonce):
         raise ReviewError('incomplete_verification')
     valid, rejected = {}, []
     for index, decision in enumerate(decisions):
-        if not isinstance(decision, dict) or decision.get('finding_id') not in ids or decision['finding_id'] in valid:
+        if (not isinstance(decision, dict) or not isinstance(decision.get('finding_id'), str)
+                or decision['finding_id'] not in ids or decision['finding_id'] in valid):
             raise ReviewError('invalid_verification_identity')
         status = decision.get('status')
         if status not in ('confirmed', 'dismissed', 'fixed', 'uncertain'):
@@ -315,7 +320,7 @@ def combine(bundle, reviews, verifications, workspace):
         status = {'confirmed': 'open', 'fixed': 'fixed', 'dismissed': 'dismissed', 'uncertain': 'uncertain'}[decision['status']]
         # A published issue needs a demonstrated fix to leave the PR; an
         # unpublished one may be dismissed like a new candidate.
-        if item.get('previous') and item.get('published') and status == 'dismissed':
+        if item.get('published') and status == 'dismissed':
             status = 'uncertain'
         findings.append({**item, 'status': status, 'verification': decision})
     verification_failed = any(item['status'] not in ('completed', 'not_needed') for item in verifications) or bool(overflow)
