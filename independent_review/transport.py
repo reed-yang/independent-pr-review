@@ -75,6 +75,8 @@ class Completion:
 
 
 class ResponsesCompletion(Completion):
+    item_types = ('message', 'reasoning')
+
     def response_metadata(self, response):
         if not isinstance(response, dict):
             raise ReviewError('invalid_provider_response')
@@ -122,8 +124,12 @@ class ResponsesCompletion(Completion):
                     self.counts['reasoning_events'] += 1
                     self.counts['reasoning_chars'] += len(delta)
             elif kind in ('response.output_item.added', 'response.output_item.done'):
-                if obj.get('item', {}).get('type') not in ('message', 'reasoning'):
+                if obj.get('item', {}).get('type') not in self.item_types:
                     raise ReviewError('incomplete_or_unexpected_model_output')
+            elif kind == 'response.function_call_arguments.delta' and 'function_call' in self.item_types:
+                delta = obj.get('delta')
+                if isinstance(delta, str) and delta:
+                    self.counts['tool_argument_events'] += 1
             elif kind == 'response.completed' or obj.get('object') == 'response':
                 response = obj['response'] if kind == 'response.completed' else obj
                 if response.get('status') != 'completed' or response.get('error') or response.get('incomplete_details'):
@@ -135,6 +141,11 @@ class ResponsesCompletion(Completion):
                 for item in output:
                     if item.get('type') == 'reasoning':
                         continue
+                    if item.get('type') == 'function_call' and 'function_call' in self.item_types:
+                        if item.get('status', 'completed') != 'completed' or not all(
+                                isinstance(item.get(key), str) for key in ('call_id', 'name', 'arguments')) or not item['call_id']:
+                            raise ReviewError('incomplete_or_unexpected_model_output')
+                        continue
                     if item.get('type') != 'message' or item.get('role') != 'assistant' or item.get('status', 'completed') != 'completed':
                         raise ReviewError('incomplete_or_unexpected_model_output')
                     for part in item.get('content', []):
@@ -145,13 +156,46 @@ class ResponsesCompletion(Completion):
                 if self.parts and ''.join(self.parts) != final:
                     raise ReviewError('provider_stream_content_mismatch')
                 self.parts = parts
+                self.keep_output(output)
                 self.model = response.get('model') if isinstance(response.get('model'), str) else None
                 self.finish, self.done = 'stop', True
         except (ValueError, TypeError, AttributeError, KeyError):
             raise ReviewError('invalid_provider_response') from None
 
+    def keep_output(self, output):
+        # The plain path never retains reasoning or other output items.
+        pass
 
-def completion(url, token, payload, backend):
+
+class ResponsesItems(ResponsesCompletion):
+    """One tool-loop turn: every output item, unchanged, for the next stateless request."""
+
+    item_types = ('message', 'reasoning', 'function_call')
+
+    def __init__(self):
+        super().__init__()
+        self.items = None
+        self.counts['tool_argument_events'] = 0
+
+    def response_metadata(self, response):
+        super().response_metadata(response)
+        details = response.get('usage', {}).get('input_tokens_details') if isinstance(response.get('usage'), dict) else None
+        if isinstance(details, dict) and type(details.get('cached_tokens')) is int and details['cached_tokens'] >= 0:
+            self.usage['cached_input_tokens'] = details['cached_tokens']
+
+    def keep_output(self, output):
+        self.items = output
+
+    def result(self, model):
+        if not self.done or self.finish != 'stop' or self.items is None:
+            raise ReviewError('incomplete_or_unexpected_model_output')
+        if not self.items:
+            raise ReviewError('empty_model_output')
+        return self.items, self.model or model, self.usage
+
+
+def completion(url, token, payload, backend, items=False):
+    """Return (text, model, usage); with items=True the text is the turn's output item list."""
     parsed = urlsplit(url)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
         raise ReviewError('https_endpoint_required')
@@ -163,7 +207,9 @@ def completion(url, token, payload, backend):
     last_progress = None
     connect_timeout = backend.get('connect_timeout_seconds', 20)
     metrics = {'transport': 'stream', 'api': backend.get('api', 'chat_completions'), 'bytes_received': 0, 'events': 0}
-    decoder = ResponsesCompletion() if backend.get('api') == 'responses' else Completion()
+    if items and backend.get('api') != 'responses':
+        raise ReviewError('unsupported_compatible_api')
+    decoder = ResponsesItems() if items else ResponsesCompletion() if backend.get('api') == 'responses' else Completion()
     stage = 'connect'
     conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443,
                                        timeout=min(connect_timeout, timeout), context=ssl.create_default_context())
