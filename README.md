@@ -1,32 +1,43 @@
 # Independent PR review
 
-Portable GitHub Actions review with independent Grok and Gemini opinions, native
-agy OAuth, evidence verification, and persistent English PR feedback.
+Portable GitHub Actions review with independent Grok and GPT opinions,
+cross-family verification of every candidate, and persistent English PR feedback.
 
 A consumer repository keeps a small workflow and its project rules. This repository
-owns the engine, reusable workflow, pinned official CLI, and provider-free tests.
-The default setup uses GitHub-hosted Ubuntu runners; a permanently running Mac mini
-is not required. The mini can provision or renew the account's interactive login.
+owns the engine, reusable workflow, pinned official Codex CLI, and provider-free
+tests. Reviews run on GitHub-hosted Ubuntu runners.
+
+Reviewers do not receive a pre-built packet of source text. Each receives a brief
+(PR metadata, the description as the author's claims, the changed-file list and
+bounded patches) and reads the repository itself from an immutable snapshot of the
+PR head and merge base: Grok through read-only tools that the engine implements,
+GPT through the official Codex CLI in its read-only, no-network sandbox. Each
+family then verifies the other family's candidates. See
+[architecture and trust boundaries](docs/architecture.md).
 
 ## What appears on the PR
 
-- One updated English summary: reviewed SHA, actual reviewer status, verified open
-  findings, uncertainty, budget and run link.
-- P1/P2 inline comments only after a fresh cross-family verification pass and a
-  demonstrated changed-line anchor. Ambiguous anchors remain in the summary.
+- One updated English summary: status, reviewed head SHA and run link; counts of
+  verified open, uncertain, verified fixed and dismissed findings; a reviewer table
+  with model, effort, status, scope and how much of the repository each lane read;
+  candidates dismissed by verification with the verifier's reason; reviewer
+  observations and limitations; budget use; and a machine-readable
+  `<!-- independent-pr-review-result:v1 {...} -->` block for agents.
+- P1/P2 inline comments only after a fresh cross-family verification call confirmed
+  them and a unique changed-line anchor exists. Ambiguous anchors remain in the summary.
 - Stable finding IDs and rechecks of unresolved issues. Only this harness's own
-  threads are resolved, after current source demonstrates a fix.
+  threads are resolved, after verification cites a fix in current source. A thread
+  that GitHub fails to resolve is shown as a warning and retried by a later run.
 - `/review`, `/review full`, `/review pause`, `/review resume`, and
   `/review verify <finding-id>` for users with current write/maintain/admin access.
 
-The harness never approves, requests changes, merges, edits code, or executes PR
-code. A completed run means the bounded review completed, not that the PR is safe
-to merge. Missing context and incomplete provider runs remain visible.
-
-Both models share one runner and run concurrently. Grok uses streaming with bounded
-deadlines; native CLI installation overlaps its request. Literal diff quotes and
-per-candidate rejection keep valid findings without presenting a partial review as
-clean. See [runtime and billing](docs/operations.md#runner-time-and-billing).
+The harness never approves, requests changes, merges or edits code. Repository code
+can run only inside the GPT lane's read-only, no-network Codex sandbox; the engine
+itself runs no tests or PR code. A completed run means the bounded review completed,
+not that the PR is safe to merge. Skipped lanes, failed providers and reviewer
+limitations remain visible. Each lane generates and verifies in its own jobs, which
+hold only that lane's provider key. See
+[runner time and billing](docs/operations.md#runner-time-and-billing).
 
 ## Connect a repository
 
@@ -40,61 +51,56 @@ clean. See [runtime and billing](docs/operations.md#runner-time-and-billing).
    using `{ "id": "api", "paths": ["src/api/*"], "file": ".github/api-review.md" }`.
    Config and rules are loaded from the trusted default-branch workflow revision.
 3. Create a `pr-review` Environment restricted to your default branch. Add its
-   encrypted Secrets: `GROK_API_KEY`, `AGY_OAUTH_JSON`, and a unique random
+   encrypted Secrets: `GROK_API_KEY`, `GPT_API_KEY`, and a unique random
    `REVIEW_STATE_KEY` of at least 32 characters. Keep keys out of YAML, git, comments,
-   and artifacts. See [OAuth and credentials](docs/authentication.md).
-4. Set repository Variables `GROK_BASE_URL`, `GROK_MODEL`, and `AGY_MODEL`.
-   The qualified Cortex deployment uses `grok-4.6` and `gemini-3.8-flash-medium`.
-   Set `GROK_EFFORT=xhigh`, `GROK_CONTEXT_WINDOW=500000`,
-   `GEMINI_EFFORT=medium`, and `GEMINI_CONTEXT_WINDOW=1048576`.
-   Gemini's medium is its next-to-highest level (low/medium/high). Grok 4.6
-   supports xhigh but has a 500k ceiling; it cannot be configured to 1M.
-   Your gateway/account must actually support your selected models.
+   and artifacts. See [credentials](docs/authentication.md).
+4. Set repository Variables `GROK_BASE_URL`, `GROK_MODEL`, `GPT_BASE_URL` and
+   `GPT_MODEL`. Each base URL is an HTTPS endpoint of the Responses API; the engine
+   appends `/responses`. Optional Variables override the defaults: `GROK_EFFORT`
+   (`xhigh`), `GROK_CONTEXT_WINDOW` (`500000`), `GPT_EFFORT` (`ultra`),
+   `GPT_VERIFY_EFFORT` (`xhigh`) and `GPT_CONTEXT_WINDOW` (`1050000`). The Cortex
+   deployment uses `grok-4.7` at `xhigh` and `gpt-6.1-sol` at `ultra`. Your gateway
+   and key must actually serve the selected models; see
+   [model capability evidence](docs/design.md#model-capability-evidence).
 5. Set `AUTO_REVIEW_ENABLED=true` and `AUTO_REVIEW_PUBLISH=true`. The latter enables
    the durable summary that records budget reservations before inference. Use a
-   manual `dry-run` first; it collects context without model calls or PR writes.
+   manual `dry-run` first; it builds the brief and lane plan without a snapshot,
+   model calls or PR writes.
 6. Open an eligible PR or dispatch `review` from the default branch. Fork PRs,
    drafts, closed PRs and non-default targets cannot invoke the providers.
 
 Reusable jobs load Secrets directly from the **consumer Environment**. No provider
 credential belongs in this engine repository. Keep the example's explicit secret
 name mappings: Environment binding alone does not reliably expose Secrets in a
-reusable workflow. No blanket `secrets: inherit` or repository-level copies are needed. The caller must grant `contents: read` and `pull-requests: write`; the
-inference job narrows permissions and does not receive a GitHub token.
+reusable workflow. No blanket `secrets: inherit` or repository-level copies are
+needed. The caller must grant `contents: read` and `pull-requests: write`; the
+generation and verification jobs run with no permissions and receive no GitHub token.
+
+### Generation policy
+
+By default both lanes generate opinions whenever the PR has changes their previous
+successful review does not cover. An optional `generation` entry in `review.json`
+limits generation per lane id:
+
+```json
+"generation": {
+  "GPT": {"min_changed_lines": 400, "min_changed_files": 10,
+          "labels": ["deep-review"], "events": ["ready_for_review"]}
+}
+```
+
+The values are only an example. A lane with a policy generates when any of these
+holds: the run comes from `/review full`, `/review verify <id>` or a `full` dispatch
+(unless `"on_full_review": false`); the `pull_request_target` action is listed in
+`events`; the PR has a listed label; or the whole PR reaches a configured threshold
+(added plus deleted lines, or changed files). Otherwise the lane is reported as
+skipped with `below_generation_threshold`, still verifies the other lane's
+candidates, and keeps its previous baseline. Add `labeled` to the caller's
+`pull_request_target` types if adding a label should start a run.
 
 [Architecture and trust boundaries](docs/architecture.md) ·
 [Operations and troubleshooting](docs/operations.md) ·
 [Design evidence and limitations](docs/design.md)
-
-## Context and effort
-
-The model window and input retrieval budget are separate. The collector can now
-assemble up to 4,000,000 serialized characters, including up to 2,500,000 related
-source characters, 100 related files and 300 API reads. Each reviewer receives its
-own bounded projection: 500,000 tokens for Grok and 1,048,576 for Gemini. Native
-agy keeps only a prefix of a user input step above 64,000 estimated tokens, so the
-native Gemini lane's input is capped at 60,000 (4,000 reserved for agy's wrapper)
-while its model window stays 1,048,576; the report states when this cap binds. Whole
-patch hunks are preserved; a lane that cannot receive every changed diff stays partial,
-and verification drops a candidate file's current text only as a last resort. Missing
-context is reported explicitly. A smaller Grok window does not cap Gemini's input.
-Changed files are read largest change first, followed by previous-finding files and
-configured includes, base versions, and then heuristic neighbors. A single file is
-bounded by the remaining budget, up to 1,000,000 characters.
-
-Input tokens are estimated from UTF-8 bytes divided by three, with ten percent of
-the configured window reserved for overhead/output (at least 16k). This is not an
-exact provider tokenizer and does not certify maximum-window accuracy. Provider
-context/truncation failures remain failures. Every review and verification input
-ends with a fresh random `END_OF_INPUT_NONCE` line that the reply must copy into
-`input_end_nonce`; a missing or different value marks that call partial, so a
-silently truncated input never advances a baseline. No fabricated context-window parameter
-is sent to the API: model selection determines provider capacity, while the engine
-budgets what it sends. Effort is sent explicitly in each provider's supported form.
-
-The default per-PR accounting ceiling is 8,000,000 tokens so a large-context review
-and its verification can run. The independent hard limit remains eight reservations;
-small PRs use their actual context and never receive padding to fill a window.
 
 ## Local development
 
@@ -106,10 +112,13 @@ python3 -m unittest discover -s tests -v
 python3 -m independent_review.cli validate-config --config examples/review.json --out /tmp/review-check
 ```
 
-The installed `independent-review` command exposes the same phases. Action execution
+`scripts/replay.py` runs one historical PR from a local clone through generation,
+verification and combination without GitHub or publication; `--fake` uses a
+scripted provider-free runner. `scripts/qualify_codex_sandbox.py` checks the pinned
+Codex sandbox on the current host without a provider. The installed
+`independent-review` command exposes the same phases as the Action. Action execution
 runs the package directly from the pinned Action directory, without installing or
-importing code from the PR. See [release procedure](docs/operations.md#releasing),
-which also covers the daily watch that proposes official agy updates as reviewed PRs.
+importing code from the PR. See [release procedure](docs/operations.md#releasing).
 
 Source was extracted from owner-authored Cortex repository tooling. Product code,
 private context, repository history and credentials are not included. No source

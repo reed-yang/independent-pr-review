@@ -1,38 +1,25 @@
-# Native agy OAuth and credentials
+# Credentials
 
-The default Gemini lane runs the official Antigravity CLI (`agy`), currently 1.2.14,
-using its native consumer Google OAuth route. The binary and archive SHA-512 are pinned
-in `independent_review/agy-release.json`; the CLI's own auto-update stays disabled and
-newer releases arrive only as reviewed pin PRs (see [releasing](operations.md#releasing)).
-The harness does not implement a substitute OAuth client, scrape browser cookies, or
-exchange consumer tokens through a proxy.
+A consumer stores three encrypted Secrets in its `pr-review` Environment, which must
+be restricted to the default branch:
 
-## Provision from a trusted interactive machine
+| Secret | Jobs that receive it | Purpose |
+| --- | --- | --- |
+| `GROK_API_KEY` | Grok generation and verification | Responses API key for `GROK_BASE_URL` |
+| `GPT_API_KEY` | GPT generation and verification | Responses API key for `GPT_BASE_URL`, held by the credential proxy |
+| `REVIEW_STATE_KEY` | Prepare and publish | HMAC key of the signed PR state, at least 32 characters |
 
-In a reviewed checkout of this repository:
+Each provider key must reach the configured model through its base URL. A gateway
+key whose group serves only GPT models is sufficient for the GPT lane and gives the
+Grok lane no access. Provider errors never switch to another key or route. The Grok
+key stays inside the engine process, whose git subprocesses receive an environment
+without it; the GPT key is held by a loopback proxy and never reaches Codex (see
+[GPT lane key isolation](architecture.md#gpt-lane-key-isolation)).
 
-```bash
-python3 -m independent_review.install_agy --out "$HOME/.local/share/independent-pr-review/agy"
-AGY_CLI_DISABLE_AUTO_UPDATE=true "$HOME/.local/share/independent-pr-review/agy"
-```
-
-Choose the personal Google account and finish browser consent, then exit the CLI.
-Its native OAuth document is normally at
-`~/.gemini/antigravity-cli/antigravity-oauth-token`. Keep the source file private
-(mode `0600`). After creating the consumer's default-branch-only `pr-review`
-Environment, sync it without displaying it:
-
-```bash
-python3 -m independent_review.agy_auth sync --repo OWNER/REPO
-```
-
-The helper validates the native consumer document and protected Environment before
-sending it to `gh secret set` over stdin. It does not print token contents or persist
-another plaintext copy. Store API keys using GitHub's encrypted Environment Secrets
-UI or a local password manager/secret tool feeding `gh secret set` via stdin.
-Never place credentials in command-line arguments or repository files.
-
-Generate a separate state key directly into the consumer's Environment:
+Store keys with GitHub's encrypted Environment Secrets UI, or feed
+`gh secret set NAME --repo OWNER/REPO --env pr-review` from a password manager
+through stdin. Never place credentials in command-line arguments or repository
+files. Generate the state key directly into the Environment:
 
 ```bash
 python3 - <<'PY'
@@ -42,32 +29,38 @@ subprocess.run(['gh', 'secret', 'set', 'REVIEW_STATE_KEY', '--repo', 'OWNER/REPO
 PY
 ```
 
-## What each hosted job proves
+Provider keys can be replaced at any time; they are not part of the configuration
+identity. Keep the state key stable while existing PRs are active: rotation requires
+a planned state migration, and there is no automatic rotation or multi-key reader.
 
-Each call creates a disposable private HOME and copies the OAuth document there.
-Only the copy's access token and expiry are deliberately made stale. The official
-CLI renews it using its own OAuth logic. Success requires a fresh access token,
-future expiry and unchanged refresh token. Rotation or revocation fails closed and
-requires reprovisioning from the interactive machine; "persistent OAuth" does not
-mean permanent authorization.
+## Local replay keys
 
-The CLI agent excludes default components, tools, MCP, plugins, skills and ambient
-customizations. Its child environment excludes GitHub/API keys and auth-route
-redirects. The runner validates agent/model selection before submitting input,
-allows one response turn, rejects tool events/denials/truncation, enforces output
-and wall-clock bounds, and removes its private state. It does not enable additional
-G1 credits. Google/account eligibility and quotas remain external dependencies.
+`scripts/replay.py` reads provider keys from the macOS Keychain into its own process
+with `--keychain-service SERVICE`. The account is the variable name in lower case
+with dashes (`grok-api-key`, `gpt-api-key`); `security add-generic-password -s
+SERVICE -a gpt-api-key -w` prompts for the value. Because a command in Codex's macOS
+sandbox can read the launch environment of same-user processes, the script refuses
+to start when a key variable is exported and the Codex lane is selected.
 
-For a smoke check, call the pinned composite Action with `phase: auth-check`, on a
-fresh hosted runner in the protected Environment, passing only `AGY_OAUTH_JSON`
-and `GEMINI_MODEL=gemini-3.8-flash-medium`, with `GEMINI_EFFORT=medium` and
-`GEMINI_CONTEXT_WINDOW=1048576`. Serialize it with `agy-subscription-account` like the review job.
+## Retired agy lane
 
-## Optional Gemini gateway
+The `gemini-ai-pro` backend ran the official Antigravity CLI (`agy`) with native
+consumer Google OAuth. It is disabled with `disabled_reason`
+`retired_until_agy_supports_gemini_4_with_repository_tools`. Its runner, the pinned
+installer and `independent_review/agy-release.json`, the `agy_auth` helper, the
+Action's `auth-check` phase and the [daily release watch](operations.md#releasing)
+remain. Re-enabling it needs a repository-reading agy harness: configuration accepts
+only the `responses_tools` and `codex_cli` harnesses and rejects the retained
+`antigravity_packet` harness (`unsupported_harness`). The reusable workflow still
+declares `AGY_OAUTH_JSON` and `GEMINI_API_KEY` but passes them to no job.
 
-A consumer can copy `independent_review/backends.json` into a trusted config file,
-select `gemini-gateway` for the Gemini slot, and set `backends` to that path. This
-route requires `GEMINI_API_KEY`, `GEMINI_BASE_URL` and `GEMINI_MODEL` (leave `AGY_MODEL`
-unset). It is an explicit alternative; provider errors never silently change the
-billing/authentication route. A GPT-only proxy key does not imply Grok or Gemini
-upstream access. Provider keys stay in the consumer repository's Environment.
+Provisioning, when the lane returns: on a trusted interactive machine, in a reviewed
+checkout, install the pinned CLI with
+`python3 -m independent_review.install_agy --out "$HOME/.local/share/independent-pr-review/agy"`,
+run it with `AGY_CLI_DISABLE_AUTO_UPDATE=true`, finish the Google login, then run
+`python3 -m independent_review.agy_auth sync --repo OWNER/REPO`. The helper checks
+that the OAuth file is private and that `pr-review` allows only the default branch,
+then stores `AGY_OAUTH_JSON` through stdin without printing it. Each hosted call
+refreshes a disposable copy with the CLI's own OAuth logic; a rotated or revoked
+refresh token fails closed and requires reprovisioning. The `auth-check` phase runs
+this refresh on a fresh runner.
