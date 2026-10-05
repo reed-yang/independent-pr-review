@@ -355,8 +355,10 @@ def run(backend, task, workspace):
     result = trace.result(stopped, {'codex_version': version, 'process_hardening': hardening,
                                     'stdout_bytes': total['stdout'], 'stderr_bytes': total['stderr'],
                                     'proxy_stopped_reason': metrics['stopped_reason']})
+    # Status and upstream error counts tell a provider outage or quota stop from a Codex failure.
     diagnostics = {'elapsed_seconds': elapsed, 'requests': metrics['requests'], 'total_tokens': metrics['total_tokens'],
-                   'events': trace.counts['events'], 'commands_total': trace.counts['commands_total']}
+                   'events': trace.counts['events'], 'commands_total': trace.counts['commands_total'],
+                   'statuses': metrics['statuses'], 'upstream_errors': metrics['upstream_errors']}
     if leaked or any(value in raw or value in json.dumps(result) for value in secrets):
         raise ReviewError('credential_in_output', diagnostics)
     if outcome == 'proxy_budget_exhausted' or metrics['stopped_reason']:

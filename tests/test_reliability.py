@@ -28,6 +28,15 @@ class EvidenceTests(unittest.TestCase):
         for quote in ('new_value\nlater_line', 'old_value\nnew_value', 'context_one\nnew_ value'):
             self.assertIsNone(evidence.match_evidence(entry, quote))
 
+    def test_reindented_quote_matches_only_whole_lines_with_identical_content(self):
+        entry = {'head_text': 'class Parser:\n    """Doc. A query never\n    names the paper."""\n    def run(self):\n        return 1\n'}
+        self.assertEqual(evidence.match_evidence(entry, '    A query never\n    names the paper."""\n  def run(self):'), 'head_text')
+        for quote in ('A query never\nnames  the paper."""', 'A query never\ndef run(self):', 'names the paper.\n    def run(self):\n        return 2'):
+            self.assertIsNone(evidence.match_evidence(entry, quote))
+        patch = {'patch': '@@ -1,3 +1,3 @@\n context_one\n-old_value\n+new_value\n trailing'}
+        self.assertEqual(evidence.match_evidence(patch, '  new_value\n  trailing'), 'patch')
+        self.assertIsNone(evidence.match_evidence(patch, 'old_value\nnew_value'))
+
     def test_base_text_counts_only_when_allowed_and_never_for_a_fix(self):
         entry = {'head_text': 'current()\n', 'base_text': 'removed_guard()\n', 'patch': ''}
         self.assertIsNone(evidence.match_evidence(entry, 'removed_guard()'))

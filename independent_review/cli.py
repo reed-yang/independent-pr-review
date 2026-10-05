@@ -208,8 +208,10 @@ def inference_context(args):
             raise ReviewError('provider_configuration_changed_after_reservation')
     from .hardening import harden_process
     harden_process()
+    # Harnesses may take their key out of the environment; keep the values for the output check.
+    secrets = tuple(os.environ[name] for name in CREDENTIAL_NAMES if os.environ.get(name))
     workspace = snapshot.Snapshot.open(args.out, bundle['snapshot'], Path(args.work) / args.lane)
-    return bundle, workspace
+    return bundle, workspace, secrets
 
 
 def lane_results(out, prefix, slots):
@@ -225,22 +227,22 @@ def lane_results(out, prefix, slots):
 
 
 def generate(args):
-    bundle, workspace = inference_context(args)
+    bundle, workspace, secrets = inference_context(args)
     review = service.generate(bundle, args.lane, workspace)
-    assert_no_credentials(review)
+    assert_no_credentials(review, secrets)
     save(Path(args.out) / f'lane-{args.lane}.json', review)
     print(f'{args.lane} opinion status:', review['status'])
 
 
 def verify(args):
-    bundle, workspace = inference_context(args)
+    bundle, workspace, secrets = inference_context(args)
     slots = bundle['config']['backends']['slots']
     reviews = lane_results(args.out, 'lane', slots)
     for slot in slots:
         if not any(review['slot'] == slot['id'] for review in reviews):
             reviews.append(missing_lane(slot))
     result = service.verify(bundle, args.lane, reviews, workspace)
-    assert_no_credentials(result)
+    assert_no_credentials(result, secrets)
     save(Path(args.out) / f'verify-{args.lane}.json', result)
     print(f'{args.lane} verification status:', result['status'])
 
