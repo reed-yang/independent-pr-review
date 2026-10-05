@@ -15,8 +15,8 @@ text = path.read_text()
 pattern = r'reed-yang/independent-pr-review@[0-9a-f]{40}'
 if args.check:
     pins = re.findall(pattern, text)
-    if len(pins) != 3 or len(set(pins)) != 1 or pins[0].endswith('0' * 40):
-        raise SystemExit('Reusable workflow must contain three identical non-placeholder SHA pins')
+    if len(pins) != 4 or len(set(pins)) != 1 or pins[0].endswith('0' * 40):
+        raise SystemExit('Reusable workflow must contain four identical non-placeholder SHA pins')
     print('Reusable workflow engine pins are immutable and consistent')
 else:
     if not args.engine or not re.fullmatch(r'[0-9a-f]{40}', args.engine):

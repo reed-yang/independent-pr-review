@@ -1,9 +1,12 @@
 name: Independent PR review phase
-description: Run one bounded phase of the portable Grok and native agy review harness
+description: Run one bounded phase of the portable Grok and Codex review harness
 inputs:
   phase:
-    description: prepare, review, publish, fail, validate-config, or auth-check
+    description: prepare, generate, verify, publish, fail, validate-config, or auth-check
     required: true
+  lane:
+    description: Reviewer lane for generate and verify
+    default: ''
   root:
     description: Trusted consumer checkout; never a PR head checkout
     default: .
@@ -38,27 +41,45 @@ runs:
       env:
         REVIEW_ACTION_PATH: ${{ github.action_path }}
       run: python3 "$REVIEW_ACTION_PATH/independent_review/install_agy.py" --out "$RUNNER_TEMP/independent-agy-bin/agy"
+    - name: Install pinned official Codex
+      if: (inputs.phase == 'generate' || inputs.phase == 'verify') && inputs.lane == 'GPT'
+      shell: bash
+      env:
+        REVIEW_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        python3 -I "$REVIEW_ACTION_PATH/independent_review/install_codex.py" --out "$RUNNER_TEMP/independent-codex"
+        # Ubuntu 24.04 restricts unprivileged user namespaces, which Codex's bubblewrap
+        # sandbox needs. The VM is disposable; the qualification below must still pass.
+        if [ "$(uname -s)" = Linux ]; then
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+        fi
+        # Qualify the sandbox in a clean environment (no provider key) before any model call.
+        env -i PATH="$PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" CODEX_BIN="$RUNNER_TEMP/independent-codex" \
+          python3 -I "$REVIEW_ACTION_PATH/scripts/qualify_codex_sandbox.py"
     - name: Execute isolated review phase
       id: phase
       shell: bash
       env:
         REVIEW_ACTION_PATH: ${{ github.action_path }}
         REVIEW_PHASE: ${{ inputs.phase }}
+        REVIEW_LANE: ${{ inputs.lane }}
         REVIEW_ROOT: ${{ inputs.root }}
         REVIEW_CONFIG: ${{ inputs.config }}
         REVIEW_OUTPUT: ${{ inputs.output }}
         REVIEW_MODE: ${{ inputs.mode }}
+        REVIEW_WORK: ${{ runner.temp }}/independent-review-work
+        CODEX_BIN: ${{ runner.temp }}/independent-codex
         AGY_BIN: ${{ runner.temp }}/independent-agy-bin/agy
-        AGY_INSTALL_MISSING: ${{ inputs.phase == 'review' && 'true' || 'false' }}
         AGY_WORK_ROOT: ${{ runner.temp }}/independent-agy-state
       run: |
         if [ "$REVIEW_PHASE" = auth-check ]; then
-          python3 -I "$REVIEW_ACTION_PATH/scripts/action_phase.py" agy_auth check
-        else
-          python3 -I "$REVIEW_ACTION_PATH/scripts/action_phase.py" cli "$REVIEW_PHASE" \
-            --root "$REVIEW_ROOT" --config "$REVIEW_CONFIG" --out "$REVIEW_OUTPUT" --mode "$REVIEW_MODE"
+          exec python3 -I "$REVIEW_ACTION_PATH/scripts/action_phase.py" agy_auth check
         fi
-    - name: Remove private native state
-      if: always() && (inputs.phase == 'review' || inputs.phase == 'auth-check')
+        # exec: no shell process keeps the provider key in its environment.
+        exec python3 -I "$REVIEW_ACTION_PATH/scripts/action_phase.py" cli "$REVIEW_PHASE" \
+          --root "$REVIEW_ROOT" --config "$REVIEW_CONFIG" --out "$REVIEW_OUTPUT" --mode "$REVIEW_MODE" \
+          --lane "$REVIEW_LANE" --work "$REVIEW_WORK"
+    - name: Remove private state
+      if: always() && inputs.phase != 'prepare' && inputs.phase != 'validate-config'
       shell: bash
-      run: rm -rf -- "$RUNNER_TEMP/independent-agy-state"
+      run: rm -rf -- "$RUNNER_TEMP/independent-agy-state" "$RUNNER_TEMP/independent-review-work"

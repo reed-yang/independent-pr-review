@@ -22,6 +22,8 @@ on:
         required: false
       GROK_API_KEY:
         required: false
+      GPT_API_KEY:
+        required: false
       AGY_OAUTH_JSON:
         required: false
       GEMINI_API_KEY:
@@ -33,7 +35,7 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    timeout-minutes: 8
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: write
@@ -41,12 +43,13 @@ jobs:
       run: ${{ steps.prepare.outputs.run }}
       publish: ${{ steps.prepare.outputs.publish }}
       pr_number: ${{ steps.prepare.outputs.pr_number }}
+      lanes: ${{ steps.prepare.outputs.lanes }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Collect trusted policy and reserve review
+      - name: Collect trusted policy, brief and snapshot; reserve review
         id: prepare
         uses: reed-yang/independent-pr-review@835c7aaf83e7ae65bebaedcc2f43da3ee440e719 # engine pin; updated by scripts/pin_release.py
         with:
@@ -63,80 +66,117 @@ jobs:
           GROK_MODEL: ${{ vars.GROK_MODEL }}
           GROK_EFFORT: ${{ vars.GROK_EFFORT }}
           GROK_CONTEXT_WINDOW: ${{ vars.GROK_CONTEXT_WINDOW }}
-          GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL }}
-          GEMINI_MODEL: ${{ vars.AGY_MODEL || vars.GEMINI_MODEL }}
-          GEMINI_EFFORT: ${{ vars.GEMINI_EFFORT }}
-          GEMINI_CONTEXT_WINDOW: ${{ vars.GEMINI_CONTEXT_WINDOW }}
+          GPT_BASE_URL: ${{ vars.GPT_BASE_URL }}
+          GPT_MODEL: ${{ vars.GPT_MODEL }}
+          GPT_EFFORT: ${{ vars.GPT_EFFORT }}
+          GPT_VERIFY_EFFORT: ${{ vars.GPT_VERIFY_EFFORT }}
+          GPT_CONTEXT_WINDOW: ${{ vars.GPT_CONTEXT_WINDOW }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.prepare.outputs.run == 'true'
         with:
           name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/independent-review/bundle.json
+          path: |
+            ${{ runner.temp }}/independent-review/bundle.json
+            ${{ runner.temp }}/independent-review/snapshot.tar.gz
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 3
 
-  review:
+  generate:
     needs: prepare
     if: needs.prepare.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.prepare.outputs.lanes) }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    # Repository-scoped: consumers sharing one Google account need separate
-    # accounts or an external dispatcher for cross-repository serialization.
-    concurrency:
-      group: agy-subscription-account
-      cancel-in-progress: false
-    # Two sequential stages can each use Grok's 60-minute inference budget.
-    # Successful calls return immediately; this is a hard ceiling, not a wait.
-    timeout-minutes: 125
+    # One reviewer phase can use its full 60-minute provider budget.
+    timeout-minutes: 75
     permissions: {}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/independent-review
-      - name: Independent opinions and candidate verification
+      - name: Independent opinion
         uses: reed-yang/independent-pr-review@835c7aaf83e7ae65bebaedcc2f43da3ee440e719 # engine pin; updated by scripts/pin_release.py
         with:
-          phase: review
+          phase: generate
+          lane: ${{ matrix.lane }}
           output: ${{ runner.temp }}/independent-review
         env:
-          GROK_BASE_URL: ${{ vars.GROK_BASE_URL }}
-          GROK_MODEL: ${{ vars.GROK_MODEL }}
-          GROK_EFFORT: ${{ vars.GROK_EFFORT }}
-          GROK_CONTEXT_WINDOW: ${{ vars.GROK_CONTEXT_WINDOW }}
-          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
-          GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL }}
-          GEMINI_MODEL: ${{ vars.AGY_MODEL || vars.GEMINI_MODEL }}
-          GEMINI_EFFORT: ${{ vars.GEMINI_EFFORT }}
-          GEMINI_CONTEXT_WINDOW: ${{ vars.GEMINI_CONTEXT_WINDOW }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          AGY_OAUTH_JSON: ${{ secrets.AGY_OAUTH_JSON }}
-      - name: Show normalized report
-        if: always()
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import os, pathlib
-          report = pathlib.Path(os.environ['RUNNER_TEMP']) / 'independent-review/result.md'
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write(report.read_text() if report.exists() else 'Review did not produce a completed report.')
-          PY
+          GROK_BASE_URL: ${{ matrix.lane == 'Grok' && vars.GROK_BASE_URL || '' }}
+          GROK_MODEL: ${{ matrix.lane == 'Grok' && vars.GROK_MODEL || '' }}
+          GROK_EFFORT: ${{ matrix.lane == 'Grok' && vars.GROK_EFFORT || '' }}
+          GROK_CONTEXT_WINDOW: ${{ matrix.lane == 'Grok' && vars.GROK_CONTEXT_WINDOW || '' }}
+          GROK_API_KEY: ${{ matrix.lane == 'Grok' && secrets.GROK_API_KEY || '' }}
+          GPT_BASE_URL: ${{ matrix.lane == 'GPT' && vars.GPT_BASE_URL || '' }}
+          GPT_MODEL: ${{ matrix.lane == 'GPT' && vars.GPT_MODEL || '' }}
+          GPT_EFFORT: ${{ matrix.lane == 'GPT' && vars.GPT_EFFORT || '' }}
+          GPT_VERIFY_EFFORT: ${{ matrix.lane == 'GPT' && vars.GPT_VERIFY_EFFORT || '' }}
+          GPT_CONTEXT_WINDOW: ${{ matrix.lane == 'GPT' && vars.GPT_CONTEXT_WINDOW || '' }}
+          GPT_API_KEY: ${{ matrix.lane == 'GPT' && secrets.GPT_API_KEY || '' }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: review-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/independent-review/result.json
-            ${{ runner.temp }}/independent-review/result.md
+          name: review-lane-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/independent-review/lane-${{ matrix.lane }}.json
+          if-no-files-found: warn
+          retention-days: 3
+
+  verify:
+    needs: [prepare, generate]
+    if: always() && !cancelled() && needs.prepare.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.prepare.outputs.lanes) }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 75
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/independent-review
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: review-lane-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/independent-review
+      - name: Cross-family candidate verification
+        uses: reed-yang/independent-pr-review@835c7aaf83e7ae65bebaedcc2f43da3ee440e719 # engine pin; updated by scripts/pin_release.py
+        with:
+          phase: verify
+          lane: ${{ matrix.lane }}
+          output: ${{ runner.temp }}/independent-review
+        env:
+          GROK_BASE_URL: ${{ matrix.lane == 'Grok' && vars.GROK_BASE_URL || '' }}
+          GROK_MODEL: ${{ matrix.lane == 'Grok' && vars.GROK_MODEL || '' }}
+          GROK_EFFORT: ${{ matrix.lane == 'Grok' && vars.GROK_EFFORT || '' }}
+          GROK_CONTEXT_WINDOW: ${{ matrix.lane == 'Grok' && vars.GROK_CONTEXT_WINDOW || '' }}
+          GROK_API_KEY: ${{ matrix.lane == 'Grok' && secrets.GROK_API_KEY || '' }}
+          GPT_BASE_URL: ${{ matrix.lane == 'GPT' && vars.GPT_BASE_URL || '' }}
+          GPT_MODEL: ${{ matrix.lane == 'GPT' && vars.GPT_MODEL || '' }}
+          GPT_EFFORT: ${{ matrix.lane == 'GPT' && vars.GPT_EFFORT || '' }}
+          GPT_VERIFY_EFFORT: ${{ matrix.lane == 'GPT' && vars.GPT_VERIFY_EFFORT || '' }}
+          GPT_CONTEXT_WINDOW: ${{ matrix.lane == 'GPT' && vars.GPT_CONTEXT_WINDOW || '' }}
+          GPT_API_KEY: ${{ matrix.lane == 'GPT' && secrets.GPT_API_KEY || '' }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: review-verify-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/independent-review/verify-${{ matrix.lane }}.json
           if-no-files-found: warn
           retention-days: 3
 
   publish:
-    needs: [prepare, review]
+    needs: [prepare, generate, verify]
     if: always() && !cancelled() && needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    timeout-minutes: 5
+    timeout-minutes: 8
     permissions:
       contents: read
       pull-requests: write
@@ -147,16 +187,35 @@ jobs:
           path: ${{ runner.temp }}/independent-review
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: review-result-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: review-*-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
           path: ${{ runner.temp }}/independent-review
-        if: needs.review.result == 'success'
-      - name: Update summary and verified inline findings
+      - name: Combine opinions, update summary and verified inline findings
         uses: reed-yang/independent-pr-review@835c7aaf83e7ae65bebaedcc2f43da3ee440e719 # engine pin; updated by scripts/pin_release.py
         with:
-          phase: ${{ needs.review.result == 'success' && 'publish' || 'fail' }}
+          phase: publish
           output: ${{ runner.temp }}/independent-review
           mode: ${{ inputs.mode }}
         env:
           GH_TOKEN: ${{ github.token }}
           REVIEW_STATE_KEY: ${{ secrets.REVIEW_STATE_KEY }}
           REVIEW_PR: ${{ needs.prepare.outputs.pr_number }}
+      - name: Show normalized report
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib
+          report = pathlib.Path(os.environ['RUNNER_TEMP']) / 'independent-review/result.md'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(report.read_text() if report.exists() else 'Review did not produce a combined report.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: review-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/independent-review/result.json
+            ${{ runner.temp }}/independent-review/result.md
+          if-no-files-found: warn
+          retention-days: 7

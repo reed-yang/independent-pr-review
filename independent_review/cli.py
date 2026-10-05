@@ -1,4 +1,8 @@
-"""Action phases keep publishing credentials out of provider processes."""
+"""Action phases keep publishing credentials out of provider processes.
+
+prepare -> generate (per lane) -> verify (per lane) -> publish. Each inference
+phase holds one provider key and no GitHub token or state key.
+"""
 
 import argparse
 import copy
@@ -7,7 +11,7 @@ import os
 from pathlib import Path
 import re
 
-from . import config as configuration, delivery, service, state
+from . import config as configuration, delivery, service, snapshot, state
 from .context import collect, eligible
 from .core import ReviewError, digest, github, load, save
 
@@ -54,6 +58,16 @@ def target(event_name, event, repo, mode, api=github):
             raise ReviewError('invalid_pr_number')
         return number, mode
     raise ReviewError('unsupported_review_event')
+
+
+def trigger_context(event_name, event, command):
+    """Describe what started this run for per-lane generation policies."""
+    pr = event.get('pull_request') or {}
+    labels = [label.get('name', '') for label in pr.get('labels', []) if isinstance(label, dict)]
+    if event_name == 'pull_request_target' and event.get('action') == 'labeled':
+        labels.append((event.get('label') or {}).get('name', ''))
+    action = event.get('action') if event_name == 'pull_request_target' else None
+    return {'command': command.split(':')[0], 'action': action, 'labels': sorted({label for label in labels if label})}
 
 
 def metadata():
@@ -122,8 +136,12 @@ def prepare(args):
         prior['lanes'][slot['id']].get('base_sha') == pr['base']['sha'] and
         prior['lanes'][slot['id']].get('config_id') == config['config_id']
         for slot in config['backends']['slots'])
-    packet = None if same_snapshot else collect(repo, number, pr, config, prior, force_full=force_full)
-    if same_snapshot or all(lane['paths'] == [] for lane in packet['lanes'].values()):
+    trigger = trigger_context(os.environ['GITHUB_EVENT_NAME'], event, command)
+    if not trigger['labels']:
+        trigger['labels'] = sorted({label['name'] for label in pr.get('labels', []) if isinstance(label, dict) and label.get('name')})
+    packet = None if same_snapshot else collect(repo, number, pr, config, prior, trigger, force_full=force_full)
+    # Nothing to generate (unchanged, or skipped by policy) means nothing new to verify.
+    if same_snapshot or all(lane['paths'] == [] or not lane['generate'] for lane in packet['lanes'].values()):
         prior = state.reuse(prior, run_url)
         if publish:
             delivery.publish_inline(prior, config, default_branch)
@@ -138,11 +156,14 @@ def prepare(args):
             delivery.write_summary(prior, comment_id, key, config['limits'])
         print('No reviewable text; no model calls were reserved.')
         return
-    bundle = {'packet': packet, 'config': config, 'state': prior, 'default_branch': default_branch, 'verify_finding': verify_finding}
     if command == 'dry-run':
-        print(json.dumps({'status': 'dry_run', 'files': len(packet['files']), 'context_files': len(packet['context']),
+        print(json.dumps({'status': 'dry_run', 'files': len(packet['files']), 'stats': packet['stats'],
                           'omitted': len(packet['omitted']), 'packet_id': packet['packet_id'], 'lanes': packet['lanes']}))
         return
+    record = snapshot.create(f'https://github.com/{repo}.git', packet['head_sha'], packet['merge_base_sha'],
+                             args.out, token=os.environ.get('GH_TOKEN'))
+    bundle = {'packet': packet, 'config': config, 'state': prior, 'default_branch': default_branch,
+              'verify_finding': verify_finding, 'snapshot': record}
     if not publish:
         raise ReviewError('publication_required_for_durable_budget_reservation')
     try:
@@ -159,32 +180,91 @@ def prepare(args):
     delivery.current_pr(reserved, default_branch)
     delivery.write_summary(reserved, comment_id, key, config['limits'])
     save(Path(args.out) / 'bundle.json', bundle)
-    output(run=True, publish=True, reason='reserved')
-    print('Reserved review; immutable code packet prepared.')
+    lanes = [slot['id'] for slot in config['backends']['slots']]
+    output(run=True, publish=True, reason='reserved', lanes=json.dumps(lanes, separators=(',', ':')))
+    print('Reserved review; brief and repository snapshot prepared.')
 
 
-def assert_no_credentials(result):
+CREDENTIAL_NAMES = ('GROK_API_KEY', 'GPT_API_KEY', 'GEMINI_API_KEY', 'AGY_OAUTH_JSON', 'REVIEW_STATE_KEY', 'GH_TOKEN')
+
+
+def assert_no_credentials(result, secrets=()):
     encoded = json.dumps(result)
-    for name in ('GROK_API_KEY', 'GEMINI_API_KEY', 'AGY_OAUTH_JSON', 'REVIEW_STATE_KEY', 'GH_TOKEN'):
-        value = os.environ.get(name, '')
+    for value in [os.environ.get(name, '') for name in CREDENTIAL_NAMES] + list(secrets):
         if value and len(value) >= 16 and value in encoded:
             raise ReviewError('credential_in_review_output')
 
 
-def review(args):
+def inference_context(args):
+    """Load one lane's inputs after checking the job holds no publishing credentials."""
     bundle = load(Path(args.out) / 'bundle.json')
     # Fail closed if a caller accidentally broadens the inference environment.
     if os.environ.get('GH_TOKEN') or os.environ.get('REVIEW_STATE_KEY'):
         raise ReviewError('publishing_credentials_in_inference_environment')
-    for name, value in bundle['config']['effective'].items():
-        if os.environ.get(name, '') != value:
+    _, _, backend = service.lane_backend(bundle['config'], args.lane)
+    for key in ('model_env', 'base_url_env', 'effort_env', 'verify_effort_env', 'context_window_env'):
+        name = backend.get(key)
+        if name and os.environ.get(name, '') != bundle['config']['effective'].get(name, ''):
             raise ReviewError('provider_configuration_changed_after_reservation')
-    result = service.run(bundle)
+    from .hardening import harden_process
+    harden_process()
+    workspace = snapshot.Snapshot.open(args.out, bundle['snapshot'], Path(args.work) / args.lane)
+    return bundle, workspace
+
+
+def lane_results(out, prefix, slots):
+    results = []
+    for slot in slots:
+        path = Path(out) / f"{prefix}-{slot['id']}.json"
+        if path.exists():
+            value = load(path)
+            if value.get('slot') != slot['id']:
+                raise ReviewError('lane_result_identity_mismatch')
+            results.append(value)
+    return results
+
+
+def generate(args):
+    bundle, workspace = inference_context(args)
+    review = service.generate(bundle, args.lane, workspace)
+    assert_no_credentials(review)
+    save(Path(args.out) / f'lane-{args.lane}.json', review)
+    print(f'{args.lane} opinion status:', review['status'])
+
+
+def verify(args):
+    bundle, workspace = inference_context(args)
+    slots = bundle['config']['backends']['slots']
+    reviews = lane_results(args.out, 'lane', slots)
+    for slot in slots:
+        if not any(review['slot'] == slot['id'] for review in reviews):
+            reviews.append(missing_lane(slot))
+    result = service.verify(bundle, args.lane, reviews, workspace)
     assert_no_credentials(result)
+    save(Path(args.out) / f'verify-{args.lane}.json', result)
+    print(f'{args.lane} verification status:', result['status'])
+
+
+def missing_lane(slot):
+    return {'slot': slot['id'], 'opinion_family': slot['opinion_family'], 'status': 'failed',
+            'error': 'lane_result_missing', 'findings': [],
+            'attempts': [{'status': 'failed', 'error': 'lane_result_missing', 'stage': 'job'}]}
+
+
+def combine(args, bundle):
+    """Merge per-lane artifacts in the publishing job; no model is called here."""
+    slots = bundle['config']['backends']['slots']
+    reviews = lane_results(args.out, 'lane', slots)
+    for slot in slots:
+        if not any(review['slot'] == slot['id'] for review in reviews):
+            reviews.append(missing_lane(slot))
+    reviews.sort(key=lambda review: [slot['id'] for slot in slots].index(review['slot']))
+    workspace = snapshot.Snapshot.open(args.out, bundle['snapshot'], Path(args.work) / 'publish')
+    result = service.combine(bundle, reviews, lane_results(args.out, 'verify', slots), workspace)
     save(Path(args.out) / 'result.json', result)
     (Path(args.out) / 'result.md').write_text(delivery.report(result))
     print('Normalized review status:', result['status'])
-    output(status=result['status'])
+    return result
 
 
 def publish(args):
@@ -193,7 +273,7 @@ def publish(args):
     if not number:
         raise ReviewError('missing_publication_target')
     bundle = load(Path(args.out) / 'bundle.json')
-    result = load(Path(args.out) / 'result.json')
+    result = combine(args, bundle)
     if digest(bundle) != result.get('bundle_id') or bundle['default_branch'] != default_branch:
         raise ReviewError('review_artifact_identity_mismatch')
     key = os.environ.get('REVIEW_STATE_KEY', '')
@@ -237,18 +317,22 @@ def fail(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('phase', choices=('prepare', 'review', 'publish', 'fail', 'validate-config'))
+    parser.add_argument('phase', choices=('prepare', 'generate', 'verify', 'publish', 'fail', 'validate-config'))
     parser.add_argument('--root', default='.')
     parser.add_argument('--config', default='.github/review.json')
     parser.add_argument('--out', required=True)
     parser.add_argument('--mode', default='review')
+    parser.add_argument('--lane', default='')
+    parser.add_argument('--work', default='')
     args = parser.parse_args()
     try:
         if args.phase == 'validate-config':
             config = configuration.load(args.root, args.config)
             print('Trusted review configuration valid:', config['config_id'])
         else:
-            {'prepare': prepare, 'review': review, 'publish': publish, 'fail': fail}[args.phase](args)
+            if args.phase in ('generate', 'verify', 'publish') and not args.work:
+                raise ReviewError('work_directory_required')
+            {'prepare': prepare, 'generate': generate, 'verify': verify, 'publish': publish, 'fail': fail}[args.phase](args)
     except ReviewError as exc:
         print('Review stopped:', str(exc))
         raise SystemExit(1) from None

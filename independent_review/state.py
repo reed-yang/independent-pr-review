@@ -8,7 +8,7 @@ import json
 import re
 import zlib
 
-from .core import ReviewError, digest, github, estimate_tokens, failure_description
+from .core import ReviewError, digest, github, failure_description
 
 
 MARKER = '<!-- independent-pr-review:v2 -->'
@@ -94,11 +94,16 @@ def reserve(state, bundle, run_id, run_url):
         raise ReviewError('review_paused')
     if state['runs'] >= limits['max_runs_per_pr']:
         raise ReviewError('review_run_budget_exhausted')
-    # A conservative estimate stays charged after an interrupted run. The token
-    # cap is an accounting guard, not a provider-side hard quota.
-    prompt_estimate = estimate_tokens(json.dumps(bundle['packet'], ensure_ascii=False))
-    estimate = 2 * sum(min(prompt_estimate + 40000, lane['input_budget_tokens']) + lane.get('output_reserve_tokens', 6500)
-                       for lane in bundle['config']['runtime'].values())
+    # A conservative per-lane estimate stays charged after an interrupted run. The
+    # token cap is an accounting guard, not a provider-side hard quota.
+    lanes = bundle['packet']['lanes']
+    estimate = 0
+    for slot in bundle['config']['backends']['slots']:
+        backend = bundle['config']['backends']['backends'][slot['backends'][0]]
+        lane = lanes[slot['id']]
+        if lane.get('generate', True) and lane['paths'] != []:
+            estimate += backend.get('reservation_tokens', 0)
+        estimate += backend.get('verification_reservation_tokens', 0)
     if state['tokens'] + estimate > limits['max_tokens_per_pr']:
         raise ReviewError('review_token_budget_exhausted')
     value['runs'] += 1
@@ -108,6 +113,25 @@ def reserve(state, bundle, run_id, run_url):
     value['status'] = 'in_progress'
     value['last_run'] = run_url
     return value
+
+
+def baseline_review(lane):
+    """Keep what reuse and later rechecks need; traces stay in the run artifacts."""
+    keep = ('slot', 'status', 'opinion_family', 'backend', 'harness', 'auth_mode', 'model', 'effort',
+            'context_window_tokens', 'scope', 'summary', 'limitations', 'findings', 'elapsed_seconds')
+    value = {key: copy.deepcopy(lane[key]) for key in keep if key in lane}
+    value.update(lane_access(lane))
+    return value
+
+
+def lane_access(lane):
+    """Bounded counts that show how much of the repository a reviewer actually read."""
+    if 'access' in lane:
+        # A reused baseline already carries its counts.
+        return {'access': lane['access']}
+    trace = lane.get('trace') or {}
+    return {'access': {'files_examined': len(lane.get('files_examined') or []),
+                       'tool_calls': trace.get('tool_calls') or 0, 'files_read': len(trace.get('files_read') or [])}}
 
 
 def accept(state, result, run_id):
@@ -120,12 +144,8 @@ def accept(state, result, run_id):
     value['tokens'] = max(0, state['tokens'] - reservation['estimated_tokens']) + result['accounted_tokens']
     for lane in result['reviews']:
         if lane['status'] == 'completed':
-            lane = copy.deepcopy(lane)
-            if 'input_context' in lane:
-                details = lane['input_context']
-                details['omitted_count'] = len(details.pop('omitted', []))
             value['lanes'][lane['slot']] = {'head_sha': result['head_sha'], 'base_sha': result['base_sha'],
-                                          'config_id': result['config_id'], 'review': lane}
+                                          'config_id': result['config_id'], 'review': baseline_review(lane)}
     for finding in result['findings']:
         old = value['findings'].get(finding['finding_id'], {})
         value['findings'][finding['finding_id']] = {**old, **finding, 'last_checked_sha': result['head_sha']}
@@ -133,6 +153,7 @@ def accept(state, result, run_id):
     value['head_sha'], value['base_sha'] = result['head_sha'], result['base_sha']
     value['last_reviews'] = [{**{key: lane.get(key) for key in
                                ('slot', 'status', 'model', 'scope', 'error', 'effort', 'context_window_tokens', 'elapsed_seconds')},
+                              **lane_access(lane),
                               'errors': [item['error'] for item in lane.get('attempts', []) if item.get('error')],
                               'failure_notes': [note for item in lane.get('attempts', []) if (note := failure_description(item))],
                               'rejected_count': len(lane.get('rejected_findings', []))} for lane in result['reviews']]
