@@ -98,6 +98,7 @@ def main():
     parser.add_argument('--out', required=True)
     parser.add_argument('--lanes', default='', help='comma-separated lane ids; default all')
     parser.add_argument('--fake', action='store_true')
+    parser.add_argument('--resume', action='store_true', help='reuse lane-*.json opinions already in --out')
     parser.add_argument('--keychain-service', help='read provider keys from this Keychain service '
                         '(account = key variable in lower case with dashes)')
     args = parser.parse_args()
@@ -123,7 +124,8 @@ def main():
     wanted = set(filter(None, args.lanes.split(','))) or {slot['id'] for slot in slots}
     keys = {} if args.fake else load_keys(config, wanted, args.keychain_service)
     runners = {name: fake_runner for name in service.ACCESS} if args.fake else None
-    work = out / 'work'
+    # Snapshot.open needs a fresh directory per workspace.
+    work = out / f'work-{time.strftime("%Y%m%d-%H%M%S")}'
 
     def open_workspace(name):
         return snapshot.Snapshot.open(out, record, work / name)
@@ -135,6 +137,9 @@ def main():
         if slot['id'] not in wanted:
             return {'slot': slot['id'], 'opinion_family': slot['opinion_family'], 'status': 'skipped',
                     'scope': 'replay_lane_not_selected', 'findings': []}
+        previous = out / f"lane-{slot['id']}.json"
+        if args.resume and previous.exists():
+            return json.loads(previous.read_text())
         review = service.generate(bundle, slot['id'], open_workspace('generate-' + slot['id']), runners)
         timings['generate-' + slot['id']] = round(time.monotonic() - start, 1)
         save(out / f"lane-{slot['id']}.json", review)
