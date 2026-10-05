@@ -30,6 +30,7 @@ CANARIES = ('REVIEW_PROXY_TOKEN', 'QUALIFY_API_KEY', 'QUALIFY_SECRET')
 PROBE = r'''
 import ctypes, ctypes.util, json, os, socket, subprocess, sys
 checkout, tmpdir, port, canaries, pids = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4].split(','), [int(p) for p in sys.argv[5].split(',')]
+unix_path = sys.argv[6]
 pids.append(os.getppid())
 result = {}
 
@@ -44,6 +45,18 @@ def write(path):
 def connect(host, port):
     try:
         socket.create_connection((host, port), timeout=3).close()
+        return 'connected'
+    except OSError:
+        return 'blocked'
+
+def unix_connect(path):
+    if not os.path.exists(path):
+        return 'absent'
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(3)
+        client.connect(path)
+        client.close()
         return 'connected'
     except OSError:
         return 'blocked'
@@ -69,6 +82,9 @@ result['write_checkout'] = write(os.path.join(checkout, 'qualify-write'))
 result['write_tmpdir'] = write(os.path.join(tmpdir, 'qualify-write'))
 result['write_home'] = write(os.path.join(os.environ.get('HOME', tmpdir), 'qualify-write'))
 result['loopback'] = connect('127.0.0.1', port)
+result['unix_socket'] = unix_connect(unix_path)
+# Hosted runners expose the Docker daemon to the runner user; reaching it would escape the sandbox.
+result['docker_socket'] = unix_connect('/var/run/docker.sock')
 try:
     socket.getaddrinfo('example.com', 443)
     result['dns'] = 'resolved'
@@ -107,10 +123,11 @@ print(json.dumps(result))
 EXPECTED = {'write_checkout': 'blocked', 'write_tmpdir': 'blocked', 'write_home': 'blocked',
             'loopback': 'blocked', 'dns': 'blocked', 'external': 'blocked', 'env_canary': False,
             'env_sensitive_names': [], 'process_environ_canary': False, 'ps_canary': False,
-            'listener_connections': 0}
+            'listener_connections': 0, 'unix_socket': 'blocked', 'unix_listener_connections': 0}
 # What the unsandboxed control run must observe for the sandbox result to mean anything.
 CONTROL = {'write_checkout': 'allowed', 'write_tmpdir': 'allowed', 'write_home': 'allowed', 'loopback': 'connected',
-           'env_canary': True, 'process_environ_canary': True, 'listener_connections': 1}
+           'env_canary': True, 'process_environ_canary': True, 'listener_connections': 1, 'unix_socket': 'connected',
+           'unix_listener_connections': 1}
 
 
 def find_codex(value):
@@ -128,16 +145,16 @@ def inner(args):
     listener.settimeout(0.2)
     done = threading.Event()
 
-    def accept():
+    def accept(server, sink):
         while not done.is_set():
             try:
-                connection, _ = listener.accept()
-                accepted.append(1)
+                connection, _ = server.accept()
+                sink.append(1)
                 connection.close()
             except OSError:
                 pass
 
-    thread = threading.Thread(target=accept, daemon=True)
+    thread = threading.Thread(target=accept, args=(listener, accepted), daemon=True)
     thread.start()
     with tempfile.TemporaryDirectory(prefix='codex-qualify-') as temporary:
         root = Path(temporary).resolve()
@@ -146,6 +163,13 @@ def inner(args):
             directory.mkdir(mode=0o700)
         (checkout / 'README').write_text('qualification checkout\n')
         subprocess.run(['git', 'init', '-q', str(checkout)], check=True, capture_output=True)
+        unix_path, unix_accepted = str(root / 'u.sock'), []
+        unix_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        unix_listener.bind(unix_path)
+        unix_listener.listen(5)
+        unix_listener.settimeout(0.2)
+        unix_thread = threading.Thread(target=accept, args=(unix_listener, unix_accepted), daemon=True)
+        unix_thread.start()
         (codex_home / 'config.toml').write_text(config_toml('gpt-6.1-sol', None, 'http://127.0.0.1:9/v1'))
         probe = root / 'probe.py'
         probe.write_text(PROBE)
@@ -155,13 +179,14 @@ def inner(args):
         canaries = ','.join(os.environ[name] for name in CANARIES)
         pids = f'{os.getpid()},{os.getppid()}'
         probe_args = [sys.executable, '-B', str(probe), str(checkout), str(tmp), str(listener.getsockname()[1]),
-                      canaries, pids]
+                      canaries, pids, unix_path]
         results = {}
         # The unsandboxed control proves each probe can observe what the sandbox must block.
         for label, command in (('control', probe_args),
                                ('sandbox', [str(binary), 'sandbox', '-P', ':read-only', '-C', str(checkout), '--',
                                             *probe_args])):
             accepted.clear()
+            unix_accepted.clear()
             process = subprocess.run(command, env=env, cwd=checkout, capture_output=True,
                                      stdin=subprocess.DEVNULL, timeout=120)
             lines = process.stdout.decode('utf-8', 'replace').strip().splitlines()
@@ -171,11 +196,14 @@ def inner(args):
                 print(f'{label} probe produced no result (exit {process.returncode})')
                 return 2
             results[label]['listener_connections'] = len(accepted)
+            results[label]['unix_listener_connections'] = len(unix_accepted)
             for path in (checkout / 'qualify-write', tmp / 'qualify-write', home / 'qualify-write'):
                 path.unlink(missing_ok=True)
         done.set()
         thread.join(1)
+        unix_thread.join(1)
         listener.close()
+        unix_listener.close()
     print(f'platform={sys.platform} hardening={hardening} codex={binary}')
     print(f'{"check":26} {"control":14} {"sandbox":14} {"expected":10} result')
     failures = 0
@@ -187,6 +215,10 @@ def inner(args):
         failures += not ok
         print(f'{name:26} {json.dumps(control)[:14]:14} {json.dumps(value)[:14]:14} {json.dumps(expected):10} '
               f'{"pass" if ok else "FAIL"}')
+    docker = results['sandbox'].get('docker_socket')
+    failures += docker == 'connected'
+    print(f'{"docker_socket":26} {json.dumps(results["control"].get("docker_socket"))[:14]:14} '
+          f'{json.dumps(docker)[:14]:14} {"not conn.":10} {"FAIL" if docker == "connected" else "pass"}')
     for name in ('process_environ_readable', 'process_environ_canary_in'):
         print(f'{name:26} {json.dumps(results["control"].get(name))[:14]:14} '
               f'{json.dumps(results["sandbox"].get(name))[:40]} (info)')
