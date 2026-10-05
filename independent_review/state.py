@@ -8,7 +8,7 @@ import json
 import re
 import zlib
 
-from .core import ReviewError, digest, github, estimate_tokens, failure_description
+from .core import ReviewError, digest, github, failure_description
 
 
 MARKER = '<!-- independent-pr-review:v2 -->'
@@ -94,11 +94,16 @@ def reserve(state, bundle, run_id, run_url):
         raise ReviewError('review_paused')
     if state['runs'] >= limits['max_runs_per_pr']:
         raise ReviewError('review_run_budget_exhausted')
-    # A conservative estimate stays charged after an interrupted run. The token
-    # cap is an accounting guard, not a provider-side hard quota.
-    prompt_estimate = estimate_tokens(json.dumps(bundle['packet'], ensure_ascii=False))
-    estimate = 2 * sum(min(prompt_estimate + 40000, lane['input_budget_tokens']) + lane.get('output_reserve_tokens', 6500)
-                       for lane in bundle['config']['runtime'].values())
+    # A conservative per-lane estimate stays charged after an interrupted run. The
+    # token cap is an accounting guard, not a provider-side hard quota.
+    lanes = bundle['packet']['lanes']
+    estimate = 0
+    for slot in bundle['config']['backends']['slots']:
+        backend = bundle['config']['backends']['backends'][slot['backends'][0]]
+        lane = lanes[slot['id']]
+        if lane.get('generate', True) and lane['paths'] != []:
+            estimate += backend.get('reservation_tokens', 0)
+        estimate += backend.get('verification_reservation_tokens', 0)
     if state['tokens'] + estimate > limits['max_tokens_per_pr']:
         raise ReviewError('review_token_budget_exhausted')
     value['runs'] += 1
@@ -108,6 +113,37 @@ def reserve(state, bundle, run_id, run_url):
     value['status'] = 'in_progress'
     value['last_run'] = run_url
     return value
+
+
+def baseline_review(lane):
+    """Keep what reuse and the summary need; traces and full findings stay in the run artifacts."""
+    keep = ('slot', 'status', 'opinion_family', 'backend', 'harness', 'auth_mode', 'model', 'effort',
+            'context_window_tokens', 'scope', 'summary', 'elapsed_seconds')
+    value = {key: copy.deepcopy(lane[key]) for key in keep if key in lane}
+    # A reused lane's findings are not candidates again; the full records live in state findings.
+    value['findings'] = [{key: finding.get(key) for key in ('finding_id', 'severity', 'path', 'line')}
+                         | {'title': str(finding.get('title', ''))[:300]} for finding in lane.get('findings', [])]
+    value.update(lane_access(lane), **lane_notes(lane))
+    return value
+
+
+def lane_notes(lane):
+    """Bounded reviewer limitations and observations shown in the summary."""
+    limitations = lane.get('limitations') if isinstance(lane.get('limitations'), list) else []
+    observations = lane.get('observations') if isinstance(lane.get('observations'), list) else []
+    return {'limitations': [text[:300] for text in limitations if isinstance(text, str)][:3],
+            'observations': [{key: str(item.get(key, ''))[:size] for key, size in (('kind', 40), ('path', 300), ('text', 500))}
+                             for item in observations if isinstance(item, dict)][:5]}
+
+
+def lane_access(lane):
+    """Bounded counts that show how much of the repository a reviewer actually read."""
+    if 'access' in lane:
+        # A reused baseline already carries its counts.
+        return {'access': lane['access']}
+    trace = lane.get('trace') or {}
+    return {'access': {'files_examined': len(lane.get('files_examined') or []),
+                       'tool_calls': trace.get('tool_calls') or 0, 'files_read': len(trace.get('files_read') or [])}}
 
 
 def accept(state, result, run_id):
@@ -120,12 +156,8 @@ def accept(state, result, run_id):
     value['tokens'] = max(0, state['tokens'] - reservation['estimated_tokens']) + result['accounted_tokens']
     for lane in result['reviews']:
         if lane['status'] == 'completed':
-            lane = copy.deepcopy(lane)
-            if 'input_context' in lane:
-                details = lane['input_context']
-                details['omitted_count'] = len(details.pop('omitted', []))
             value['lanes'][lane['slot']] = {'head_sha': result['head_sha'], 'base_sha': result['base_sha'],
-                                          'config_id': result['config_id'], 'review': lane}
+                                          'config_id': result['config_id'], 'review': baseline_review(lane)}
     for finding in result['findings']:
         old = value['findings'].get(finding['finding_id'], {})
         value['findings'][finding['finding_id']] = {**old, **finding, 'last_checked_sha': result['head_sha']}
@@ -133,21 +165,47 @@ def accept(state, result, run_id):
     value['head_sha'], value['base_sha'] = result['head_sha'], result['base_sha']
     value['last_reviews'] = [{**{key: lane.get(key) for key in
                                ('slot', 'status', 'model', 'scope', 'error', 'effort', 'context_window_tokens', 'elapsed_seconds')},
+                              **lane_access(lane), **lane_notes(lane),
                               'errors': [item['error'] for item in lane.get('attempts', []) if item.get('error')],
                               'failure_notes': [note for item in lane.get('attempts', []) if (note := failure_description(item))],
                               'rejected_count': len(lane.get('rejected_findings', []))} for lane in result['reviews']]
+    value.update({key: result.get(key) for key in ('merge_base_sha', 'config_id', 'engine_version')})
+    value['description_truncated'] = bool(result.get('description_truncated'))
+    value['description_chars'] = result['description_chars'] if type(result.get('description_chars')) is int else None
     value['coverage'] = result['coverage']
     value['omitted_count'] = len(result['omitted'])
     value['reservation'] = None
     return value
 
 
-def reuse(state, run_url):
+def skip_by_policy(state, run_url, lanes):
+    """Record a new head that no lane reviewed because every lane with changes is below its policy."""
+    value = reuse(state, run_url, lanes)
+    value['status'] = 'skipped_by_policy'
+    shown = {lane.get('slot') for lane in value['last_reviews']}
+    for slot, plan in lanes.items():
+        if slot not in shown:
+            value['last_reviews'].append({
+                'slot': slot, 'status': 'skipped', 'scope': plan.get('reason'),
+                'access': {'files_examined': 0, 'tool_calls': 0, 'files_read': 0}, 'limitations': [],
+                'observations': [], 'errors': [], 'failure_notes': [], 'rejected_count': 0})
+    return value
+
+
+def reuse(state, run_url, lanes=None):
+    """Mark an unchanged run; a lane its generation policy skipped is shown as skipped."""
     value = copy.deepcopy(state)
     value['status'] = 'completed'
     value['last_run'] = run_url
     value['reservation'] = None
-    value['last_reviews'] = [{**lane, 'status': 'reused', 'scope': 'identical_successful_snapshot',
-                              'errors': [], 'failure_notes': [], 'rejected_count': 0}
-                             for lane in value.get('last_reviews', [])]
+    reviews = []
+    for lane in value.get('last_reviews', []):
+        plan = (lanes or {}).get(lane.get('slot')) or {}
+        if plan and plan.get('paths') != [] and not plan.get('generate', True):
+            lane = {'slot': lane.get('slot'), 'status': 'skipped', 'scope': plan.get('reason'),
+                    'access': {'files_examined': 0, 'tool_calls': 0, 'files_read': 0}, 'limitations': [], 'observations': []}
+        else:
+            lane = {**lane, 'status': 'reused', 'scope': 'identical_successful_snapshot'}
+        reviews.append({**lane, 'errors': [], 'failure_notes': [], 'rejected_count': 0})
+    value['last_reviews'] = reviews
     return value

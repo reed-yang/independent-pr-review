@@ -8,7 +8,7 @@ import re
 import subprocess
 
 from .agy_runner import AgyError, oauth_document, run
-from .core import ReviewError, parse_findings, runtime_settings
+from .core import ReviewError, runtime_settings
 
 
 def sync(source, repo):
@@ -53,8 +53,11 @@ def check():
     # end-of-input nonce contract that every review and verification call uses.
     raw, model, usage = run(backend, 'Native OAuth smoke test. Return only JSON: '
                             '{"summary":"OAuth smoke passed","limitations":[],"findings":[]}.')
-    result = parse_findings(raw, {"files": []})
-    if result["summary"] != "OAuth smoke passed" or result["findings"]:
+    try:
+        result = json.loads(raw.strip().removeprefix("```json").removesuffix("```"))
+    except ValueError:
+        result = {}
+    if not isinstance(result, dict) or result.get("summary") != "OAuth smoke passed" or result.get("findings"):
         raise AgyError("agy_smoke_contract_failed")
     print(json.dumps({"status": "completed", "harness": "antigravity_packet",
                       "model": model, "native_refresh": "verified",

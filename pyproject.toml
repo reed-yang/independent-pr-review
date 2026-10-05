@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "independent-pr-review"
-version = "0.2.2"
-description = "Portable independent AI PR review with native agy OAuth"
+version = "0.4.0"
+description = "Portable independent AI PR review that reads the repository with read-only tools"
 requires-python = ">=3.11"
 
 [project.scripts]

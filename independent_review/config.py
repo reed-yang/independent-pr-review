@@ -11,10 +11,19 @@ from . import __version__
 
 
 DEFAULTS = {
-    'packet_chars': 4000000, 'context_chars': 2500000, 'max_context_files': 100,
-    'max_api_reads': 300, 'max_runs_per_pr': 8, 'max_tokens_per_pr': 8000000,
+    'brief_chars': 400000, 'description_chars': 60000, 'max_api_reads': 300,
+    'max_runs_per_pr': 8, 'max_tokens_per_pr': 60000000,
     'max_inline_comments': 5, 'max_verification_candidates': 10,
 }
+CEILINGS = {'brief_chars': 2000000, 'description_chars': 200000, 'max_api_reads': 600,
+            'max_runs_per_pr': 100, 'max_tokens_per_pr': 500000000,
+            'max_inline_comments': 10, 'max_verification_candidates': 10}
+# Lanes read the repository themselves; packet harnesses cannot run in this pipeline.
+TOOL_HARNESSES = ('responses_tools', 'codex_cli')
+ENV_KEYS = ('model_env', 'base_url_env', 'key_env', 'oauth_env', 'binary_env', 'state_env',
+            'effort_env', 'verify_effort_env', 'context_window_env')
+BUDGET_FIELDS = ('max_turns', 'max_tool_calls', 'max_tool_output_chars', 'max_total_tool_output_chars',
+                 'max_requests', 'max_total_tokens', 'reservation_tokens', 'verification_reservation_tokens')
 
 
 def trusted_file(root, name):
@@ -45,28 +54,37 @@ def load(root, path):
         backend = backends['backends'][slot['backends'][0]]
         if backend.get('opinion_family') != slot['opinion_family']:
             raise ReviewError('reviewer_family_mismatch')
-        for key in ('model_env', 'base_url_env', 'key_env', 'oauth_env', 'binary_env', 'state_env', 'effort_env', 'context_window_env'):
+        if backend.get('disabled_reason'):
+            raise ReviewError('review_backend_disabled')
+        if backend.get('harness') not in TOOL_HARNESSES:
+            raise ReviewError('unsupported_harness')
+        for key in ENV_KEYS:
             name = backend.get(key)
             if name and not re.fullmatch(r'[A-Z][A-Z0-9_]{0,80}', name):
                 raise ReviewError('invalid_backend_environment_name')
-        for key in ('model_env', 'base_url_env', 'effort_env', 'context_window_env'):
+        for key in ('model_env', 'base_url_env', 'effort_env', 'verify_effort_env', 'context_window_env'):
             if key in backend:
                 effective[backend[key]] = os.environ.get(backend[key], '')
-        if backend.get('harness') not in ('compatible_packet', 'gemini_packet', 'antigravity_packet'):
-            raise ReviewError('unsupported_harness')
-        if backend.get('api', 'chat_completions') not in ('chat_completions', 'responses'):
-            raise ReviewError('unsupported_compatible_api')
-        if type(backend.get('timeout_seconds')) is not int or not 10 <= backend['timeout_seconds'] <= 3600:
+        if type(backend.get('timeout_seconds')) is not int or not 10 <= backend['timeout_seconds'] <= 7200:
             raise ReviewError('invalid_provider_timeout')
         for field in ('connect_timeout_seconds', 'idle_timeout_seconds', 'progress_timeout_seconds'):
             if field in backend and (type(backend[field]) is not int or not 1 <= backend[field] <= backend['timeout_seconds']):
                 raise ReviewError('invalid_provider_timeout')
+        if any(field in backend and (type(backend[field]) is not int or backend[field] < 1) for field in BUDGET_FIELDS):
+            raise ReviewError('invalid_backend_budget')
     limits = {**DEFAULTS, **raw.get('limits', {})}
-    ceilings = {'packet_chars': 8000000, 'context_chars': 6000000, 'max_context_files': 200,
-                'max_api_reads': 600, 'max_runs_per_pr': 100, 'max_tokens_per_pr': 10000000,
-                'max_inline_comments': 10, 'max_verification_candidates': 10}
-    if set(limits) != set(DEFAULTS) or any(type(v) is not int or not 1 <= v <= ceilings[k] for k, v in limits.items()):
+    if set(limits) != set(DEFAULTS) or any(type(v) is not int or not 1 <= v <= CEILINGS[k] for k, v in limits.items()):
         raise ReviewError('invalid_review_limits')
+    generation = raw.get('generation', {})
+    if not isinstance(generation, dict) or not set(generation) <= {slot['id'] for slot in slots}:
+        raise ReviewError('invalid_generation_policy')
+    for policy in generation.values():
+        if (not isinstance(policy, dict) or not set(policy) <= {'min_changed_lines', 'min_changed_files', 'labels', 'events', 'on_full_review'}
+                or any(type(policy.get(key, 0)) is not int or policy.get(key, 0) < 0 for key in ('min_changed_lines', 'min_changed_files'))
+                or any(not isinstance(policy.get(key, []), list) or not all(isinstance(v, str) for v in policy.get(key, []))
+                       for key in ('labels', 'events'))
+                or type(policy.get('on_full_review', True)) is not bool):
+            raise ReviewError('invalid_generation_policy')
     rules = []
     for file in raw.get('rules', []):
         rules.append({'id': file, 'paths': ['*'], 'text': trusted_file(root, file).read_text()})
@@ -76,12 +94,8 @@ def load(root, path):
         rules.append({'id': policy['id'], 'paths': policy['paths'], 'text': trusted_file(root, policy['file']).read_text()})
     if sum(len(rule['text']) for rule in rules) > 50000:
         raise ReviewError('combined_policy_too_large')
-    context = raw.get('context', {})
-    for key in ('include', 'source_roots'):
-        if key in context and (not isinstance(context[key], list) or not all(isinstance(p, str) for p in context[key])):
-            raise ReviewError('invalid_context_scope')
     config = {'version': 1, 'backends': backends, 'effective': effective, 'limits': limits,
-              'rules': rules, 'context': context,
+              'rules': rules, 'generation': generation,
               'runtime': {slot['id']: runtime_settings(backends['backends'][slot['backends'][0]]) for slot in slots}, 'inline_comments': raw.get('inline_comments', True),
               'verification': raw.get('verification', True), 'engine_version': __version__}
     if type(config['inline_comments']) is not bool or config['verification'] is not True:

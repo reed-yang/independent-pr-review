@@ -4,66 +4,75 @@
       "id": "Grok",
       "opinion_family": "grok",
       "backends": [
-        "grok-gateway"
+        "grok-tools"
       ]
     },
     {
-      "id": "Gemini",
-      "opinion_family": "gemini",
+      "id": "GPT",
+      "opinion_family": "gpt",
       "backends": [
-        "gemini-ai-pro"
+        "gpt-codex"
       ]
     }
   ],
   "backends": {
-    "grok-gateway": {
-      "harness": "compatible_packet",
+    "grok-tools": {
+      "harness": "responses_tools",
       "api": "responses",
       "opinion_family": "grok",
       "auth_mode": "gateway_api_key",
       "base_url_env": "GROK_BASE_URL",
       "key_env": "GROK_API_KEY",
       "model_env": "GROK_MODEL",
-      "output_limit_parameter": "max_tokens",
-      "timeout_seconds": 3600,
-      "output_reserve_tokens": 128000,
-      "connect_timeout_seconds": 20,
-      "idle_timeout_seconds": 120,
-      "fallback_on": [
-        "network_or_timeout",
-        "http_502",
-        "http_503",
-        "http_504"
-      ],
       "effort_env": "GROK_EFFORT",
       "context_window_env": "GROK_CONTEXT_WINDOW",
       "default_effort": "xhigh",
-      "default_context_window_tokens": 500000
+      "default_context_window_tokens": 500000,
+      "output_reserve_tokens": 128000,
+      "timeout_seconds": 3600,
+      "connect_timeout_seconds": 20,
+      "idle_timeout_seconds": 120,
+      "final_turn_reserve_seconds": 600,
+      "max_turns": 40,
+      "max_tool_calls": 80,
+      "max_tool_output_chars": 60000,
+      "max_total_tool_output_chars": 1200000,
+      "reservation_tokens": 4000000,
+      "verification_reservation_tokens": 2000000
     },
-    "gemini-gateway": {
-      "harness": "gemini_packet",
-      "opinion_family": "gemini",
+    "gpt-codex": {
+      "harness": "codex_cli",
+      "opinion_family": "gpt",
       "auth_mode": "gateway_api_key",
-      "base_url_env": "GEMINI_BASE_URL",
-      "key_env": "GEMINI_API_KEY",
-      "model_env": "GEMINI_MODEL",
-      "timeout_seconds": 600,
-      "fallback_on": [],
-      "effort_env": "GEMINI_EFFORT",
-      "context_window_env": "GEMINI_CONTEXT_WINDOW",
-      "default_effort": "medium",
-      "default_context_window_tokens": 1048576
+      "base_url_env": "GPT_BASE_URL",
+      "key_env": "GPT_API_KEY",
+      "model_env": "GPT_MODEL",
+      "effort_env": "GPT_EFFORT",
+      "verify_effort_env": "GPT_VERIFY_EFFORT",
+      "context_window_env": "GPT_CONTEXT_WINDOW",
+      "binary_env": "CODEX_BIN",
+      "default_effort": "ultra",
+      "default_verify_effort": "xhigh",
+      "default_context_window_tokens": 1050000,
+      "output_reserve_tokens": 128000,
+      "timeout_seconds": 3600,
+      "connect_timeout_seconds": 20,
+      "idle_timeout_seconds": 300,
+      "max_requests": 400,
+      "max_total_tokens": 30000000,
+      "reservation_tokens": 8000000,
+      "verification_reservation_tokens": 3000000
     },
     "gemini-ai-pro": {
       "harness": "antigravity_packet",
       "opinion_family": "gemini",
       "auth_mode": "google_ai_pro_subscription",
+      "disabled_reason": "retired_until_agy_supports_gemini_4_with_repository_tools",
       "binary_env": "AGY_BIN",
       "state_env": "AGY_WORK_ROOT",
       "oauth_env": "AGY_OAUTH_JSON",
       "model_env": "GEMINI_MODEL",
       "timeout_seconds": 600,
-      "fallback_on": [],
       "effort_env": "GEMINI_EFFORT",
       "context_window_env": "GEMINI_CONTEXT_WINDOW",
       "default_effort": "medium",

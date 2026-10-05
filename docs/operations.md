@@ -9,48 +9,64 @@ suffixes. `/review verify <id>` validates a unique unresolved finding prefix and
 a full review, prioritizing that finding within the verification cap; it is not a cheaper single-issue run.
 
 `/review` reuses an identical successful snapshot. `/review full` forces new opinions
-but respects all budgets. `/review pause` prevents future reservations; a model
-already running is not interrupted by this command. `/review resume` unpauses and
-reviews the latest eligible snapshot. Close/draft events mark existing state
-ineligible without provider calls. No command enables fork review or overrides the
-configured default branch, caps or trusted policy.
+but respects all budgets. `/review full`, `/review verify` and a `full` dispatch also
+make lanes with a [generation policy](../README.md#generation-policy) generate,
+unless that policy sets `"on_full_review": false`. `/review pause` prevents future
+reservations; a model already running is not interrupted by this command.
+`/review resume` unpauses and reviews the latest eligible snapshot. Close/draft
+events mark existing state ineligible without provider calls. No command enables
+fork review or overrides the configured default branch, caps or trusted policy.
+A `dry-run` dispatch prints the changed-file count, statistics, omissions and lane
+plan in the prepare log without creating a snapshot, reserving budget, calling a
+model or writing to the PR.
 
 The summary is advisory. A provider/verification failure is partial or failed,
-never an empty clean result. Workflow publication fails on incomplete review after
-writing the truthful summary. A cancelled workflow can retain an in-progress
-reservation; the next eligible run remains charged for it. Read its run link.
-Known transport failures include a short English explanation in the PR summary;
-raw provider error text is never used as comment prose. Reusing a successful
-snapshot clears transient failure notes without refunding consumed run budget.
+never an empty clean result; a lane skipped by its generation policy is not a
+failure. The publish job fails on an incomplete review after writing the truthful
+summary. A cancelled workflow can retain an in-progress reservation; the next
+eligible run remains charged for it. Read its run link. Known transport failures
+include a short English explanation in the PR summary; raw provider error text is
+never used as comment prose. Reusing a successful snapshot clears transient failure
+notes without refunding consumed run budget.
+
+To judge how much a reviewer read, use the summary's "Repository read" column and
+each lane's `trace` in `result.json` (tool calls, files read, up to 100 redacted
+commands, truncated outputs and `stopped_reason`); `result.md` lists the first five
+commands and per-lane usage.
 
 ## Failure recovery
 
 | Symptom | Action |
 | --- | --- |
-| `http_503`, no upstream accounts, quota errors | Fix the selected provider group/account and retry within the budget; no fallback is automatic. |
-| `provider_connect_timeout`, `provider_headers_timeout`, `provider_idle_timeout`, `provider_deadline_exceeded` | Inspect redacted stage, timing, byte and event counters in result.json. Grok defaults to 20s connect, 120s socket idle and 3600s total for xhigh; Gemini remains at 600s total. Streaming keepalives do not extend the total deadline. A timer shuts down the connected socket at that deadline, including during slow headers or chunk framing; interrupted reads retain `provider_deadline_exceeded` and safe diagnostics. No automatic retry spends another full call. |
-| `provider_progress_timeout` | No nonempty reasoning or final-text delta arrived within an explicitly configured `progress_timeout_seconds`. Disabled by default: silent internal reasoning can outlast visible summaries. Keepalive comments and status-only events do not renew this optional budget. Compare `last_byte_seconds`, `last_progress_seconds`, `seconds_without_progress` and `keepalive_lines`. This is an incomplete review, not proof of an upstream crash or a clean result. JSON responses that ignore streaming retain the existing socket/total limits because they expose no incremental progress. |
-| `provider_stream_error` with `incomplete_reason` | The upstream explicitly ended the response as incomplete. Inspect the allowlisted reason and numeric `provider_usage`, including `reasoning_tokens`; partial text is never accepted as a completed review. `max_output_tokens` semantics differ across providers and must not be assumed to bound internal reasoning. |
+| `http_<status>`, no upstream accounts, quota errors on the Grok lane | Fix the selected provider group/account and retry within the budget; no fallback is automatic. |
+| `provider_connect_timeout`, `provider_headers_timeout`, `provider_idle_timeout`, `provider_deadline_exceeded` | Inspect redacted stage, timing, byte and event counters in result.json. Each Grok turn has a 20 s connect and 120 s idle limit under the lane's 3,600 s total; keepalives do not extend the total. A tool turn cut off at the 600 s final-answer reserve still gets a final answer turn (`interrupted_turns`). No automatic retry spends another full call. |
+| `provider_progress_timeout` | Occurs only when a custom backends file sets `progress_timeout_seconds`: no reasoning or text delta arrived within it. It is disabled by default because silent reasoning can outlast visible progress. This is an incomplete review, not proof of an upstream crash. |
+| `provider_stream_error` with `incomplete_reason` | The upstream ended the response as incomplete. Inspect the allowlisted reason and numeric `provider_usage`; partial text is never accepted. `max_output_tokens` semantics differ across providers and must not be assumed to bound internal reasoning. |
 | `provider_dns_error`, `provider_tls_error`, `provider_connection_error` | Check the configured gateway/network. Diagnostics never contain raw exceptions, headers, response bodies or credentials. |
-| `input_end_nonce_missing`, `input_end_nonce_mismatch` | The model did not echo the per-call end-of-input nonce, so it may have seen only a prefix of its input; native agy truncates an oversized input step without failing. Evidence-checked candidates and decisions are kept, but the lane or verification batch stays partial and no baseline advances. Compare the lane's estimated input with the native step cap in result.md; repeated failures on small inputs mean the model ignored the output contract. |
-| `lane_diff_omitted` | The lane's input budget (for native agy, the step cap) could not hold every changed-file diff, so whole diffs were left out (`diff_lane_budget` in result.json). Its findings are kept, but the lane stays partial and its baseline does not advance, so later incremental runs still cover those files. Reduce the changed text per PR. |
-| `required_evidence_exceeds_lane_context`, `packet_metadata_exceeds_lane_context` | Required diffs, PR metadata or omission records exceed that lane's input budget after optional source was dropped. That lane or verification batch fails at stage `input` without a model call; the other lane's result is kept and the run is partial. |
-| Rejected candidate or verification evidence | Inspect its redacted, bounded quote preview and reason in result.json. Literal contiguous diff-side quotes are accepted without diff markers. Invalid generation candidates are excluded; invalid verification decisions become uncertain. Valid siblings are retained, but the review remains partial and cannot advance a successful baseline. Copy contiguous source quotes exactly, preserving line breaks; use a short decisive quote instead of joining locations. |
-| `agy_error_<status>`, `agy_error_unclassified` | agy (1.2.6+) ended the turn with a structured `AGY_ERROR` line, normally exit code 3; the code keeps only its canonical status, for example `agy_error_resource_exhausted`. Diagnostics keep `retryable`, `code_kind` and a numeric `error_code`; message text and error IDs are discarded. `retryable` is informational and triggers no automatic retry. Check the account's quota/model access, then retry within the budget. |
-| `agy_authentication_required`, refresh rotation | Log in interactively and resync encrypted OAuth; do not paste tokens in comments. |
-| Missing state/provider Secret in reusable jobs | Preserve explicit caller secret name mappings and the callee declarations; Environment binding alone can yield empty values. |
+| `prompt_exceeds_configured_context_budget` | The Grok prompt (rules, instructions and brief) does not fit the lane's input budget, so no model call was made and the lane does not verify in this run. Lower `brief_chars` or `description_chars`, or shorten the rules. |
+| Grok `stopped_reason` other than `final_answer` | Not a failure: a turn, tool call, output, context or time limit was reached and the lane answered from what it had read. Check its limitations. `tool_budget_exhausted` (tool calls after tools were disabled) and `empty_model_output` (no final text) fail the lane. |
+| `codex_timeout`, `proxy_budget_exhausted` | The Codex run reached 3,600 s, or the proxy reached its request, token or time limit (`stopped_reason` in diagnostics). Diagnostics keep elapsed time and request, token, event and command counts. |
+| `codex_turn_failed`, `codex_process_failed`, `codex_no_final_message` | Codex ended without a final answer. Diagnostics keep counts only, not upstream errors; check the gateway account's access to `GPT_MODEL` and retry within the budget. |
+| Codex install or sandbox qualification step failed | The GPT job stopped before any model call, so publication reports `lane_result_missing` or `verification_result_missing`. Read the qualification table in the job log; do not bypass a failed check. `codex_not_found` or `codex_version_mismatch` instead means `CODEX_BIN` is not the pinned package. |
+| `lane_result_missing`, `verification_result_missing` | That lane's job wrote no result: setup failure, job timeout, `process_hardening_failed`, `snapshot_identity_mismatch`, `publishing_credentials_in_inference_environment` or `provider_configuration_changed_after_reservation` (a lane Variable changed after prepare). Read the job log and rerun. |
+| `verification_skipped_after_provider_failure` | The lane's generation failed with a configuration or authorization error, so it did not verify the other lane's candidates; they stay uncertain and the run is partial. Fix the provider problem and run `/review`. |
+| `credential_in_output`, `credential_in_review_output` | A known credential value appeared in model output, a trace or a lane result. The lane failed closed and nothing containing the value was written. Rotate the affected key. |
+| `input_end_nonce_missing`, `input_end_nonce_mismatch` | The reviewer did not echo the per-call end-of-input nonce, so it may not have seen its whole input. Evidence-checked results are kept, but the lane or verification batch stays partial and no baseline advances. Repeated failures on small inputs mean the model ignored the output contract. |
+| Rejected candidate or verification evidence | Inspect its redacted, bounded quote preview and reason in result.json. Invalid generation candidates are excluded; invalid verification decisions become uncertain. Valid siblings are retained, but the review remains partial and cannot advance a successful baseline. Quotes must be contiguous and exact, preserving line breaks. |
+| Missing state/provider Secret in reusable jobs, `backend_not_configured` | Preserve explicit caller secret name mappings and the callee declarations; Environment binding alone can yield empty values. |
 | State signature mismatch | Restore the correct state key. Do not silently delete/reset state to bypass budgets. |
-| Context/effort configuration rejected | Use the actual model limit and supported effort. Grok 4.6 is 500k/xhigh; Gemini 3.8 Flash supports 1M and low/medium/high. |
+| `unsupported_reasoning_effort`, `configured_context_exceeds_model_capacity`, `invalid_context_window` | Use an effort the harness accepts (`low` to `xhigh` for Grok; `low` to `max` or `ultra` for Codex) and no more than the model's window; see [model capability evidence](design.md#model-capability-evidence). |
+| `review_backend_disabled`, `unsupported_harness` | A custom backends file selects the retired agy backend or a non-tool harness. See [the retired agy lane](authentication.md#retired-agy-lane). |
 | Run or token budget exhausted | A trusted maintainer can review usage and raise the default-branch config cap in a reviewed change. Commands cannot raise it. |
+| `skipped_by_policy` | Every lane with changes is below its generation policy, so no reviewer ran for the current head. Use `/review full` or a configured label to review it. |
 | Stale head/base at publication | Review the current snapshot; old results cannot be attached to the new SHA. |
 | Inline publication failed | Retry `/review`. Successful cached evidence can recover an already posted comment by its owned marker. |
+| Publication warning about verified-fixed threads | GitHub refused to resolve an owned thread; the summary names the error type and a later run retries. Check that the caller still grants `pull-requests: write`. |
 | Missing or ambiguous anchor | Read the summary/report; the harness intentionally does not guess an inline location. |
 
-Keep the state key stable while existing PRs are active. Rotation requires a planned
-state migration; this initial version has no automatic rotation/multi-key reader.
 Large ledgers fail closed at the comment/state size limit. There is no external
-state database, organization-wide budget service, persistent semantic index,
-automatic incident routing, or automatic account refresh-token propagation.
+state database, organization-wide budget service, persistent semantic index or
+automatic incident routing.
 
 ## Runner time and billing
 
@@ -60,95 +76,76 @@ has separate limits. See [GitHub Actions billing](https://docs.github.com/en/bil
 and [per-job rounding](https://docs.github.com/en/billing/reference/actions-runner-pricing).
 For private consumers, optimize summed job time, not just end-to-end wall time.
 
-Both reviewers run concurrently on one Ubuntu runner, and verification batches
-also run concurrently when both families are needed. No Python dependencies,
-consumer environment, product packages or repository tests are installed. Native
-agy is downloaded and checksum-verified in its own lane while Grok starts; the
-same verified binary serves a subsequent verification call in that job. Native
-OAuth/HOME state is never cached. Three credential-separated jobs are retained.
-The review job has a 125-minute ceiling for generation followed by verification;
-each stage can spend up to 60 minutes waiting for Grok. Successful calls return
-immediately, so this ceiling does not make small reviews wait. Grok reserves
-128,000 completion tokens for reasoning and visible output when usage is missing;
-this is conservative accounting, not a provider-enforced reasoning limit.
+A review uses six jobs: prepare, one generation and one verification job per lane,
+and publish, each on its own runner and rounded separately. Verification starts
+after both generation jobs finish, so wall time is about the slower generation plus
+the slower verification. Job ceilings are 10 minutes for prepare, 75 for each
+generation and verification job (each provider call is limited to 3,600 s), and 8
+for publish; successful calls return immediately. Runs that reuse an identical
+snapshot or have nothing to generate end in prepare. No Python dependencies,
+consumer environment, product packages or repository tests are installed. Each
+inference job downloads the handoff artifact and extracts the snapshot. Both GPT
+jobs also download the pinned Codex package and run the sandbox qualification, even
+when generation is skipped by policy or the verification batch is empty.
 
-Source collection reads immutable tree sizes before downloading optional source
-that cannot fit. On Cortex PR #13 this reduced API reads from 234 to 13 while
-preserving byte-for-byte equivalent supplied files and context. Identical successful
-snapshots skip source collection and model calls. A failed provider is not called
-again for verification during the same run; affected candidates stay uncertain.
-Failed attempts retain timing, stage and usage where available. Rejected candidates
-never advance the successful baseline or become a clean cached opinion.
+`result.md` reports each lane's input, cached input, output, reasoning and total
+tokens and request count. Each stateless Grok turn resends the earlier turns, so its
+input tokens grow with the number of turns.
+
+## Upgrading from v0.3
+
+Updating only the workflow pin is not enough:
+
+1. In `review.json`, remove `context` and the `packet_chars`, `context_chars` and
+   `max_context_files` limits (they fail with `invalid_review_limits`); use
+   `brief_chars` and `description_chars` if the defaults do not fit.
+2. Raise `max_tokens_per_pr` to at least 17,000,000 or remove it for the 60,000,000
+   default. One two-lane run reserves 17M (Grok 4M + 2M, GPT 8M + 3M); the v0.3
+   example's 8M makes every run stop with `review_token_budget_exhausted`.
+3. Add the `GPT_API_KEY` Secret to the Environment and to the caller's `secrets:`
+   mapping, and set `GPT_BASE_URL` and `GPT_MODEL` (optionally `GPT_EFFORT`,
+   `GPT_VERIFY_EFFORT`). `AGY_OAUTH_JSON`, `GEMINI_API_KEY` and the `AGY_*`/`GEMINI_*`
+   Variables are no longer used.
+4. Optionally add a `generation` policy for GPT and the `labeled` event.
+5. Run `validate-config` with the new pin before merging, then `/review full` on an
+   eligible PR.
 
 ## Releasing
 
-1. Run provider-free tests, config validation and actionlint. Review source/artifact
-   inclusion and native release hashes. Commit engine/action changes as commit A.
-2. Run `python3 scripts/pin_release.py --engine FULL_COMMIT_A_SHA` and commit the
-   reusable workflow pin as commit B. The engine commit does not reference itself.
+1. Run provider-free tests, config validation, `python3 scripts/pin_release.py --check`
+   and actionlint. `--check` also requires `independent_review.__version__` and the
+   `pyproject.toml` version to match. Review source/artifact inclusion and the Codex
+   and agy release hashes. Commit engine/action changes as commit A.
+2. Run `python3 scripts/pin_release.py --engine FULL_COMMIT_A_SHA` to set the four
+   engine pins of the reusable workflow (prepare, generate, verify and publish) and
+   commit them as commit B. The engine commit does not reference itself.
 3. Validate the cross-repository workflow with an eligible consumer PR. Publish a
    version tag/release at B containing both pins and actual validation evidence.
 4. Consumers update their workflow to B in a reviewed PR. They can roll back by
    restoring the prior immutable SHA; mutable tags are not used for execution.
 
-The `Official agy release watch` workflow runs daily and on dispatch from the default
-branch. `scripts/agy_release.py check` compares the pin with Google's linux_amd64 and
-darwin_arm64 update manifests. For a newer version, `update` downloads both archives,
-verifies their SHA-512 and statically checks that the linux binary still sets the
-qualified 64000-token `MaxTokensPerUserInputStep`; a miss fails with
-`native_step_cap_unqualified` and leaves the pin for human qualification. Same-version
-manifests with different artifacts, or older manifests, also fail for human review.
-After the provider-free checks pass, the job creates or updates branch
-`chore/agy-<version>` and its PR, leaving an existing branch's commits unchanged; a
-closed PR for that version is respected until reopened manually. Only same-repository
-PRs count, since fork PRs can reuse the branch name, and an open PR's body is updated
-only while its head is the branch tip. Allow GitHub Actions to create pull requests
-in the repository settings. PRs created with
-`GITHUB_TOKEN` trigger no other workflows, so the PR body records this job's evidence;
-dispatch `Harness checks` on the branch when CI on its head is needed. The tracking
-flow is: watch PR, review (agy changelog, runner compatibility), merge and engine
-release (steps 1-3), then consumer pin update (step 4). Dependabot proposes external
-Action SHA updates weekly; the engine self-pin is excluded.
+No workflow watches Codex releases. To move the pin, update the version, tag and
+each platform's URL and SHA-256 in `independent_review/codex-release.json` from the
+official `openai/codex` release, review its changelog for configuration keys,
+`codex exec` flags, JSONL events and sandbox behaviour (the runner uses
+`--strict-config`), and let CI run the sandbox qualification. The runner rejects any
+other Codex version.
 
-Engine CI has no provider Secrets. Consumer runs validate actual gateway/OAuth
+The `Official agy release watch` workflow still runs daily so the retired agy lane
+can be re-enabled on a current pin. For a newer version than
+`independent_review/agy-release.json`, it downloads both official archives, verifies
+their SHA-512, statically checks that the linux binary still sets the qualified
+64000-token `MaxTokensPerUserInputStep` (a miss fails with
+`native_step_cap_unqualified`), runs the provider-free checks and creates or updates
+a same-repository `chore/agy-<version>` PR; a closed PR for that version is respected
+until reopened manually. Allow GitHub Actions to create pull requests in the
+repository settings. PRs created with `GITHUB_TOKEN` trigger no other workflows, so
+dispatch `Harness checks` on the branch when CI on its head is needed. Dependabot
+proposes external Action SHA updates weekly; the engine self-pin is excluded.
+
+Engine CI has no provider Secrets. It runs the tests, config validation and pin
+check, and the Codex sandbox qualification, on both `ubuntu-latest` and
+`ubuntu-26.04` during the runner migration. Consumer runs validate actual gateway
 access. Protect release tags and default-branch workflow/config changes according
 to the collaboration model of each project. Do not install the review as a required
 merge check until its quota, reliability and noise are understood for that project.
-Engine CI runs on both `ubuntu-latest` and `ubuntu-26.04` during the runner migration.
-
-
-The default Grok adapter uses native `/responses` with `reasoning.effort`, rather
-than relying on gateway conversion of Chat Completions. Custom compatible backends
-can explicitly set `api` to `chat_completions` or `responses`; this is part of the
-configuration identity, never an automatic fallback. Both use the same configured
-base URL/key/model. Responses streams require a completed terminal response with
-matching final text. Reports count reasoning events/characters without saving them.
-The archived PR13 Chat stream connected in 0.37s, returned HTTP 200 at 5.03s and
-received 305 events/101733 bytes, but hit its 600s deadline without recognized final
-content. That proves a response-phase failure, not a connection or HTTP auth error;
-its old counters cannot distinguish reasoning from protocol mismatch.
-
-The native Responses replay also reached 600s: HTTP 200 at 3.91s, 30 recognized
-reasoning events (333 characters), and no content events. The request was accepted
-but upstream generation/scheduling did not yield final text within the deadline;
-these counters do not reveal internal thinking throughput or the gateway queue.
-A later replay of the identical original packet completed through the gateway on
-[hosted run 34954973753](https://github.com/reed-yang/cortex-research/actions/runs/34954973753):
-1413.96s, 45,674 input and 81,849 output tokens, including 81,669 reasoning tokens.
-It reported no qualifying P1/P2 findings and explicit missing-context limitations.
-The native OAuth control completed in 1774.18s with 101,070 reasoning tokens and
-four candidates requiring independent verification. Both used Grok 4.6/xhigh;
-changing authentication did not remove the long reasoning period. The gateway's
-largest public-progress gap was 1403.86s despite keepalives. These completions
-explain why 600s was inadequate and why a short progress watchdog is unsafe;
-they do not guarantee every call completes within the new 3600s ceiling.
-
-The hosted replay spent about five seconds preparing before inference, then three
-seconds finishing the job after inference. No model retry or product environment
-installation ran. The remaining 23.6 minutes were spent inside the provider call.
-This is a large-PR completion sample, not a full-window quality benchmark.
-
-Normal hosted acceptance on Cortex #18 completed with Grok at 28.35s and native
-Gemini at 13.54s, producing one English summary. Prepare/review/publish used
-13s/34s/7s (54s summed runner time). That packet had one changed file and five
-related files, about 15k estimated input tokens; it is not a large-context benchmark.
