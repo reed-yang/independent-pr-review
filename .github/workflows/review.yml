@@ -71,7 +71,7 @@ jobs:
           GPT_EFFORT: ${{ vars.GPT_EFFORT }}
           GPT_VERIFY_EFFORT: ${{ vars.GPT_VERIFY_EFFORT }}
           GPT_CONTEXT_WINDOW: ${{ vars.GPT_CONTEXT_WINDOW }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.prepare.outputs.run == 'true'
         with:
           name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
@@ -116,7 +116,7 @@ jobs:
           GPT_VERIFY_EFFORT: ${{ matrix.lane == 'GPT' && vars.GPT_VERIFY_EFFORT || '' }}
           GPT_CONTEXT_WINDOW: ${{ matrix.lane == 'GPT' && vars.GPT_CONTEXT_WINDOW || '' }}
           GPT_API_KEY: ${{ matrix.lane == 'GPT' && secrets.GPT_API_KEY || '' }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: review-lane-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -163,7 +163,7 @@ jobs:
           GPT_VERIFY_EFFORT: ${{ matrix.lane == 'GPT' && vars.GPT_VERIFY_EFFORT || '' }}
           GPT_CONTEXT_WINDOW: ${{ matrix.lane == 'GPT' && vars.GPT_CONTEXT_WINDOW || '' }}
           GPT_API_KEY: ${{ matrix.lane == 'GPT' && secrets.GPT_API_KEY || '' }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: review-verify-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -210,7 +210,7 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write(report.read_text() if report.exists() else 'Review did not produce a combined report.')
           PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: review-result-${{ github.run_id }}-${{ github.run_attempt }}
