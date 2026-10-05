@@ -23,3 +23,20 @@ jobs:
       - run: python3 -m independent_review.cli validate-config --config examples/review.json --out /tmp/review-check
       - name: Check immutable engine references
         run: python3 scripts/pin_release.py --check
+  codex-sandbox:
+    # Qualifies the pinned Codex read-only sandbox exactly as the GPT lane does, without a provider key.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: python3 -I independent_review/install_codex.py --out "$RUNNER_TEMP/independent-codex"
+      - run: sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - run: |
+          env -i PATH="$PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" CODEX_BIN="$RUNNER_TEMP/independent-codex" \
+            python3 -I scripts/qualify_codex_sandbox.py
