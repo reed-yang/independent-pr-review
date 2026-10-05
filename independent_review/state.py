@@ -116,12 +116,24 @@ def reserve(state, bundle, run_id, run_url):
 
 
 def baseline_review(lane):
-    """Keep what reuse and later rechecks need; traces stay in the run artifacts."""
+    """Keep what reuse and the summary need; traces and full findings stay in the run artifacts."""
     keep = ('slot', 'status', 'opinion_family', 'backend', 'harness', 'auth_mode', 'model', 'effort',
-            'context_window_tokens', 'scope', 'summary', 'limitations', 'findings', 'elapsed_seconds')
+            'context_window_tokens', 'scope', 'summary', 'elapsed_seconds')
     value = {key: copy.deepcopy(lane[key]) for key in keep if key in lane}
-    value.update(lane_access(lane))
+    # A reused lane's findings are not candidates again; the full records live in state findings.
+    value['findings'] = [{key: finding.get(key) for key in ('finding_id', 'severity', 'path', 'line')}
+                         | {'title': str(finding.get('title', ''))[:300]} for finding in lane.get('findings', [])]
+    value.update(lane_access(lane), **lane_notes(lane))
     return value
+
+
+def lane_notes(lane):
+    """Bounded reviewer limitations and observations shown in the summary."""
+    limitations = lane.get('limitations') if isinstance(lane.get('limitations'), list) else []
+    observations = lane.get('observations') if isinstance(lane.get('observations'), list) else []
+    return {'limitations': [text[:300] for text in limitations if isinstance(text, str)][:3],
+            'observations': [{key: str(item.get(key, ''))[:size] for key, size in (('kind', 40), ('path', 300), ('text', 500))}
+                             for item in observations if isinstance(item, dict)][:5]}
 
 
 def lane_access(lane):
@@ -153,22 +165,33 @@ def accept(state, result, run_id):
     value['head_sha'], value['base_sha'] = result['head_sha'], result['base_sha']
     value['last_reviews'] = [{**{key: lane.get(key) for key in
                                ('slot', 'status', 'model', 'scope', 'error', 'effort', 'context_window_tokens', 'elapsed_seconds')},
-                              **lane_access(lane),
+                              **lane_access(lane), **lane_notes(lane),
                               'errors': [item['error'] for item in lane.get('attempts', []) if item.get('error')],
                               'failure_notes': [note for item in lane.get('attempts', []) if (note := failure_description(item))],
                               'rejected_count': len(lane.get('rejected_findings', []))} for lane in result['reviews']]
+    value.update({key: result.get(key) for key in ('merge_base_sha', 'config_id', 'engine_version')})
+    value['description_truncated'] = bool(result.get('description_truncated'))
+    value['description_chars'] = result['description_chars'] if type(result.get('description_chars')) is int else None
     value['coverage'] = result['coverage']
     value['omitted_count'] = len(result['omitted'])
     value['reservation'] = None
     return value
 
 
-def reuse(state, run_url):
+def reuse(state, run_url, lanes=None):
+    """Mark an unchanged run; a lane its generation policy skipped is shown as skipped."""
     value = copy.deepcopy(state)
     value['status'] = 'completed'
     value['last_run'] = run_url
     value['reservation'] = None
-    value['last_reviews'] = [{**lane, 'status': 'reused', 'scope': 'identical_successful_snapshot',
-                              'errors': [], 'failure_notes': [], 'rejected_count': 0}
-                             for lane in value.get('last_reviews', [])]
+    reviews = []
+    for lane in value.get('last_reviews', []):
+        plan = (lanes or {}).get(lane.get('slot')) or {}
+        if plan and plan.get('paths') != [] and not plan.get('generate', True):
+            lane = {'slot': lane.get('slot'), 'status': 'skipped', 'scope': plan.get('reason'),
+                    'access': {'files_examined': 0, 'tool_calls': 0, 'files_read': 0}, 'limitations': [], 'observations': []}
+        else:
+            lane = {**lane, 'status': 'reused', 'scope': 'identical_successful_snapshot'}
+        reviews.append({**lane, 'errors': [], 'failure_notes': [], 'rejected_count': 0})
+    value['last_reviews'] = reviews
     return value

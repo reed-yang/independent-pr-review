@@ -1,76 +1,68 @@
-import base64
+import contextlib
 import copy
+import io
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from independent_review import anchors, cli, config, context, core, delivery, service, state
+from independent_review import anchors, cli, config, context, core, state
+from support import KEY, NUMBER, REPO, ROOT, clean_env, settings
 
 
-REPO = 'owner/project'
-KEY = 'test-state-key-with-at-least-thirty-two-characters'
 BASE, HEAD = 'b' * 40, 'a' * 40
+PATCH = '@@ -1,2 +1,2 @@\n def first(value):\n-    return None\n+    return value[0]'
 
 
-def pr():
-    return {'state': 'open', 'draft': False, 'title': 'Handle values', 'body': '', 'changed_files': 1,
-            'head': {'sha': HEAD, 'repo': {'full_name': REPO}}, 'base': {'sha': BASE, 'ref': 'main'}}
+def pr(**changes):
+    value = {'state': 'open', 'draft': False, 'title': 'Handle values', 'body': '', 'changed_files': 1,
+             'head': {'sha': HEAD, 'repo': {'full_name': REPO}}, 'base': {'sha': BASE, 'ref': 'main'}}
+    value.update(changes)
+    return value
 
 
-def settings():
-    return config.load(Path(__file__).resolve().parents[1], 'examples/review.json')
-
-
-def packet():
-    return {'repository': REPO, 'pr_number': 7, 'head_sha': HEAD, 'base_sha': BASE, 'packet_id': 'packet',
-            'coverage': 'bounded_diff_and_related_source', 'omitted': [], 'rules': [], 'context': [],
-            'lanes': {'Grok': {'paths': None, 'reason': 'full'}, 'Gemini': {'paths': None, 'reason': 'full'}},
-            'files': [{'path': 'src/a.py', 'patch': '@@ -1,2 +1,2 @@\n def first(value):\n-    return None\n+    return value[0]',
-                       'head_text': 'def first(value):\n    return value[0]\n', 'base_text': 'def first(value):\n    return None\n'}]}
+def entry():
+    return {'path': 'src/a.py', 'patch': PATCH, 'head_text': 'def first(value):\n    return value[0]\n',
+            'base_text': 'def first(value):\n    return None\n'}
 
 
 def candidate():
     return anchors.bind({'path': 'src/a.py', 'line': 2, 'severity': 'P2', 'title': 'Empty list fails',
                          'body': 'An empty list raises IndexError for callers without a length guard.',
-                         'evidence': 'return value[0]'}, packet()['files'][0])
+                         'evidence': 'return value[0]'}, entry())
 
 
-def bundle():
-    return {'packet': packet(), 'config': settings(), 'state': state.initial(REPO, 7), 'default_branch': 'main'}
+def item(name, additions=1, deletions=1, patch=None, **extra):
+    return {'filename': name, 'status': 'modified', 'additions': additions, 'deletions': deletions,
+            'patch': patch if patch is not None else '@@ -1 +1 @@\n-old\n+new', **extra}
 
 
-def answer(findings=None):
-    return json.dumps({'summary': 'Reviewed the supplied scope.', 'limitations': [], 'findings': findings or []})
+def bundle(lanes=None):
+    cfg = settings()
+    lanes = lanes or {slot['id']: {'paths': None, 'reason': 'explicit_full_review', 'generate': True}
+                      for slot in cfg['backends']['slots']}
+    return {'packet': {'repository': REPO, 'pr_number': NUMBER, 'base_sha': BASE, 'head_sha': HEAD, 'lanes': lanes},
+            'config': cfg, 'state': state.initial(REPO, NUMBER), 'default_branch': 'main'}
 
 
-def input_end(prompt):
-    """Return the value a compliant model copies from the final input line."""
-    return prompt.rsplit('\nEND_OF_INPUT_NONCE=', 1)[1]
-
-
-def verification_payload(prompt):
-    return json.JSONDecoder().raw_decode(prompt, prompt.index('{"packet":'))[0]
-
-
-def echo_input_end(runners):
-    """Make fake runners answer like a model that saw the whole input."""
-    def wrap(runner):
-        def call(backend, prompt):
-            raw, model, usage = runner(backend, prompt)
-            try:
-                value = json.loads(raw)
-            except (TypeError, ValueError):
-                return raw, model, usage
-            if isinstance(value, dict):
-                raw = json.dumps({**value, 'input_end_nonce': input_end(prompt)})
-            return raw, model, usage
-        return call
-    return {name: wrap(runner) for name, runner in runners.items()}
+def result(**changes):
+    value = {'repository': REPO, 'pr_number': NUMBER, 'base_sha': BASE, 'merge_base_sha': 'c' * 40, 'head_sha': HEAD,
+             'config_id': 'config', 'engine_version': '0.4.0', 'bundle_id': None, 'status': 'completed',
+             'coverage': 'repository_snapshot_with_read_tools', 'omitted': [], 'findings': [], 'accounted_tokens': 20,
+             'description_truncated': True, 'description_chars': 70000,
+             'reviews': [{'slot': 'Grok', 'status': 'completed', 'model': 'grok-4.7', 'effort': 'xhigh', 'scope': 'incremental',
+                          'summary': 'Read it.', 'findings': [], 'files_examined': ['a', 'b'],
+                          'trace': {'tool_calls': 4, 'files_read': ['a']},
+                          'limitations': ['x' * 900] * 6,
+                          'observations': [{'kind': 'risk', 'path': 'p' * 900, 'text': 't' * 3000}] * 8},
+                         {'slot': 'GPT', 'status': 'skipped', 'scope': 'below_generation_threshold', 'findings': []}]}
+    value.update(changes)
+    return value
 
 
 class AnchorTests(unittest.TestCase):
@@ -79,18 +71,18 @@ class AnchorTests(unittest.TestCase):
         self.assertEqual([(l['side'], l['line']) for l in lines], [('LEFT', 2), ('RIGHT', 2), ('LEFT', 8), ('RIGHT', 8), ('RIGHT', 9)])
 
     def test_ambiguous_repeated_evidence_stays_summary_only(self):
-        entry = {'patch': '@@ -0,0 +1,2 @@\n+return value[0]\n+return value[0]'}
-        self.assertIsNone(anchors.locate(entry, 'return value[0]'))
-        self.assertEqual(anchors.locate(entry, 'return value[0]', 2), {'side': 'RIGHT', 'line': 2})
+        value = {'patch': '@@ -0,0 +1,2 @@\n+return value[0]\n+return value[0]'}
+        self.assertIsNone(anchors.locate(value, 'return value[0]'))
+        self.assertEqual(anchors.locate(value, 'return value[0]', 2), {'side': 'RIGHT', 'line': 2})
 
     def test_context_line_is_never_used_as_an_inline_anchor(self):
-        self.assertIsNone(anchors.locate(packet()['files'][0], 'def first(value):'))
+        self.assertIsNone(anchors.locate(entry(), 'def first(value):'))
 
     def test_identity_ignores_title_and_carries_rename(self):
         original = candidate()
-        item = {**original, 'title': 'Different wording', 'path': 'src/renamed.py'}
-        entry = {**packet()['files'][0], 'path': item['path'], 'previous_filename': original['path']}
-        self.assertEqual(original['finding_id'], anchors.bind(item, entry)['finding_id'])
+        renamed = {**original, 'title': 'Different wording', 'path': 'src/renamed.py'}
+        moved = {**entry(), 'path': renamed['path'], 'previous_filename': original['path']}
+        self.assertEqual(original['finding_id'], anchors.bind(renamed, moved)['finding_id'])
 
 
 class StateTests(unittest.TestCase):
@@ -121,23 +113,76 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(core.ReviewError, 'run_budget_exhausted'):
             state.reserve(value, data, '1:2', 'url')
 
+    def test_reservation_charges_generation_only_for_lanes_that_generate(self):
+        backends = settings()['backends']['backends']
+        grok, gpt = backends['grok-tools'], backends['gpt-codex']
+        full = {'paths': None, 'reason': 'explicit_full_review', 'generate': True}
+        cases = [({'Grok': full, 'GPT': full}, grok['reservation_tokens'] + gpt['reservation_tokens']),
+                 ({'Grok': full, 'GPT': {**full, 'generate': False, 'reason': 'below_generation_threshold'}}, grok['reservation_tokens']),
+                 ({'Grok': {**full, 'paths': []}, 'GPT': {**full, 'paths': ['src/a.py']}}, gpt['reservation_tokens'])]
+        verification = grok['verification_reservation_tokens'] + gpt['verification_reservation_tokens']
+        for lanes, generation in cases:
+            with self.subTest(lanes=lanes):
+                data = bundle(lanes)
+                reserved = state.reserve(data['state'], data, '1:1', 'url')
+                # A skipped or unchanged lane still verifies the other family's candidates.
+                self.assertEqual(reserved['tokens'], generation + verification)
+                self.assertEqual(reserved['reservation']['estimated_tokens'], generation + verification)
+        data = bundle()
+        data['config']['limits']['max_tokens_per_pr'] = grok['reservation_tokens']
+        with self.assertRaisesRegex(core.ReviewError, 'token_budget_exhausted'):
+            state.reserve(data['state'], data, '1:1', 'url')
+
     def test_result_cannot_move_to_another_run_or_pr(self):
         data = bundle()
         reserved = state.reserve(data['state'], data, '1:1', 'url')
-        result = service.run(data, echo_input_end({name: lambda *args: (answer(), 'model', {'total_tokens': 10}) for name in core.HARNESSES}))
-        for run_id, change in [('2:1', {}), ('1:1', {'pr_number': 8}), ('1:1', {'head_sha': 'c' * 40})]:
+        value = result(bundle_id=reserved['reservation']['bundle_id'])
+        for run_id, change in [('2:1', {}), ('1:1', {'pr_number': 8}), ('1:1', {'head_sha': 'c' * 40}),
+                               ('1:1', {'bundle_id': 'other'})]:
             with self.assertRaisesRegex(core.ReviewError, 'stale_or_unbound'):
-                state.accept(reserved, {**result, **change}, run_id)
-        accepted = state.accept(reserved, result, '1:1')
+                state.accept(reserved, {**value, **change}, run_id)
+        accepted = state.accept(reserved, value, '1:1')
         self.assertEqual(accepted['tokens'], 20)
-        self.assertEqual(len(accepted['lanes']), 2)
+        self.assertEqual(set(accepted['lanes']), {'Grok'})
         with self.assertRaises(core.ReviewError):
-            state.accept(accepted, result, '1:1')
+            state.accept(accepted, value, '1:1')
+
+    def test_accept_keeps_bounded_notes_identity_and_description_flag(self):
+        data = bundle()
+        reserved = state.reserve(data['state'], data, '1:1', 'url')
+        accepted = state.accept(reserved, result(bundle_id=reserved['reservation']['bundle_id']), '1:1')
+        grok, gpt = accepted['last_reviews']
+        self.assertEqual(grok['access'], {'files_examined': 2, 'tool_calls': 4, 'files_read': 1})
+        self.assertEqual(len(grok['limitations']), 3)
+        self.assertTrue(all(len(text) == 300 for text in grok['limitations']))
+        self.assertEqual(len(grok['observations']), 5)
+        self.assertEqual({len(value) for value in grok['observations'][0].values()}, {4, 300, 500})
+        self.assertEqual((gpt['status'], gpt['scope'], gpt['limitations']), ('skipped', 'below_generation_threshold', []))
+        self.assertEqual((accepted['merge_base_sha'], accepted['config_id'], accepted['engine_version']), ('c' * 40, 'config', '0.4.0'))
+        self.assertEqual((accepted['description_truncated'], accepted['description_chars']), (True, 70000))
+        # The baseline review keeps the same bounded notes for a later reuse.
+        baseline = accepted['lanes']['Grok']['review']
+        self.assertEqual((len(baseline['limitations']), len(baseline['observations'])), (3, 5))
+        self.assertNotIn('trace', baseline)
+        reused = state.reuse(accepted, 'https://github.com/owner/project/actions/runs/2')
+        self.assertEqual(reused['last_reviews'][0]['limitations'], grok['limitations'])
+        self.assertEqual(reused['last_reviews'][0]['observations'], grok['observations'])
+
+    def test_bounded_notes_keep_a_full_state_under_capacity(self):
+        value = state.initial(REPO, 7)
+        lane = result()['reviews'][0]
+        value['last_reviews'] = [{**state.lane_access(lane), **state.lane_notes(lane), 'slot': name} for name in ('Grok', 'GPT')]
+        value['lanes'] = {name: {'review': state.baseline_review({**lane, 'findings': [
+            {'finding_id': 'f' * 24, 'severity': 'P1', 'path': 'p' * 500, 'line': 3, 'title': 't' * 4000,
+             'mechanism': 'm' * 4000, 'body': 'b' * 20000}] * 5})} for name in ('Grok', 'GPT')}
+        raw = len(json.dumps(value, sort_keys=True, separators=(',', ':')))
+        self.assertLess(raw, state.MAX_RAW // 4)
+        self.assertNotIn('mechanism', json.dumps(value['lanes']))
+        state.encode(value, KEY)
 
     def test_resume_reuse_restores_completed_state_without_refunding_budget(self):
         value = state.initial(REPO, 7)
-        value.update(status='ready', runs=3, tokens=1234,
-                     reservation={'run_id': 'interrupted'},
+        value.update(status='ready', runs=3, tokens=1234, reservation={'run_id': 'interrupted'},
                      last_reviews=[{'slot': 'Grok', 'status': 'completed', 'scope': 'full'}])
         reused = state.reuse(value, 'https://github.com/owner/project/actions/runs/2')
         self.assertEqual(reused['status'], 'completed')
@@ -146,6 +191,18 @@ class StateTests(unittest.TestCase):
         self.assertEqual(reused['last_reviews'][0]['scope'], 'identical_successful_snapshot')
         self.assertEqual(value['status'], 'ready')
 
+    def test_reuse_reports_a_lane_skipped_by_policy_as_skipped(self):
+        value = state.initial(REPO, 7)
+        value['last_reviews'] = [{'slot': 'Grok', 'status': 'completed', 'scope': 'incremental', 'limitations': ['old']},
+                                 {'slot': 'GPT', 'status': 'completed', 'model': 'gpt-6.1-sol', 'limitations': ['old'],
+                                  'access': {'files_examined': 9, 'tool_calls': 9, 'files_read': 9}}]
+        lanes = {'Grok': {'paths': [], 'reason': 'identical_successful_snapshot', 'generate': True},
+                 'GPT': {'paths': ['src/a.py'], 'reason': 'below_generation_threshold', 'generate': False}}
+        grok, gpt = state.reuse(value, 'url', lanes)['last_reviews']
+        self.assertEqual((grok['status'], grok['scope'], grok['limitations']), ('reused', 'identical_successful_snapshot', ['old']))
+        self.assertEqual((gpt['status'], gpt['scope'], gpt['limitations']), ('skipped', 'below_generation_threshold', []))
+        self.assertEqual(gpt['access'], {'files_examined': 0, 'tool_calls': 0, 'files_read': 0})
+
     def test_oversized_state_fails_before_comment_publication(self):
         value = state.initial(REPO, 7)
         value['extra'] = 'x' * state.MAX_RAW
@@ -153,185 +210,155 @@ class StateTests(unittest.TestCase):
             state.encode(value, KEY)
 
 
-class ContextTests(unittest.TestCase):
-    def api(self, repo, path):
-        if path == 'pulls/7':
-            return pr()
-        if path.startswith('pulls/7/files'):
-            return [{'filename': 'src/a.py', 'status': 'modified', 'patch': packet()['files'][0]['patch']}]
-        if path.startswith('compare/'):
-            return {'merge_base_commit': {'sha': BASE}, 'status': 'ahead', 'commits': [{'sha': HEAD}], 'files': [{'filename': 'src/a.py'}]}
-        if path.startswith('git/trees/'):
-            return {'tree': [{'type': 'blob', 'path': p} for p in ('src/a.py', 'src/test_a.py', 'src/caller.py')]}
-        if path.startswith('contents/'):
-            text = packet()['files'][0]['head_text'] if 'src/a.py' in path else 'from a import first\nfirst([])\n'
-            return {'type': 'file', 'encoding': 'base64', 'content': base64.b64encode(text.encode()).decode()}
-        raise AssertionError(path)
+class BriefTests(unittest.TestCase):
+    trigger = {'command': 'review', 'action': 'synchronize', 'labels': []}
 
-    def test_immutable_context_includes_related_test_and_sibling(self):
-        data = context.collect(REPO, 7, pr(), settings(), state.initial(REPO, 7), api=self.api)
-        self.assertEqual({entry['path'] for entry in data['context']}, {'src/test_a.py', 'src/caller.py'})
-        self.assertLessEqual(data['context_reads'], settings()['limits']['max_api_reads'])
-        self.assertFalse(data['full_repository_review'])
+    def build(self, items, cfg=None, prior=None, trigger=None, body='', force_full=False, api=None, changed=None):
+        cfg = cfg or settings()
+        value = pr(body=body, changed_files=len(items) if changed is None else changed)
+        reader = context.Reader(REPO, 10, api or (lambda *args: self.fail('Unexpected API read')))
+        return context.build(REPO, NUMBER, value, items, 'c' * 40, cfg, prior or state.initial(REPO, NUMBER),
+                             trigger or self.trigger, force_full, reader)
 
-    def test_bare_relative_import_does_not_select_the_entire_repository(self):
-        paths = ['src/api/app.py']
-        entries = [{'head_text': 'from . import handlers\nfrom ..shared import value\n', 'patch': ''}]
-        tree = [{'type': 'blob', 'path': path} for path in
-                ('src/api/handlers.py', 'src/shared.py', 'unrelated/build.py')]
-        selected = dict(context.related_candidates(paths, entries, tree, {}))
-        self.assertEqual(selected, {'src/shared.py': 'import_dependency',
-                                    'src/api/handlers.py': 'sibling_module'})
-
-    def test_current_changed_files_take_priority_over_base_versions(self):
-        snapshot = pr()
-        snapshot['changed_files'] = 2
-        def api(repo, path):
-            if path == 'pulls/7':
-                return snapshot
-            if path.startswith('pulls/7/files'):
-                return [{'filename': name, 'status': 'modified',
-                         'patch': '@@ -1 +1 @@\n-old\n+new'} for name in ('src/a.py', 'src/b.py')]
-            if path.startswith('contents/'):
-                value = 'x' * (40 if path.endswith(HEAD) else 80)
-                return {'type': 'file', 'encoding': 'base64',
-                        'content': base64.b64encode(value.encode()).decode()}
-            if path.startswith('git/trees/'):
-                return {'tree': []}
-            return self.api(repo, path)
+    def test_patches_are_admitted_largest_change_first_within_the_brief_budget(self):
         cfg = settings()
-        cfg['limits']['context_chars'] = 150
-        data = context.collect(REPO, 7, snapshot, cfg, state.initial(REPO, 7), api=api)
-        self.assertTrue(all(item['head_text'] == 'x' * 40 for item in data['files']))
-        self.assertTrue(all(item['base_text'] is None for item in data['files']))
-        self.assertEqual({item['reason'] for item in data['omitted']}, {'base_text_unavailable_or_budget'})
-
-    def collect_with(self, files, contents, cfg, tree, prior=()):
-        snapshot = pr()
-        snapshot['changed_files'] = len(files)
-        def api(repo, path):
-            if path == 'pulls/7':
-                return snapshot
-            if path.startswith('pulls/7/files'):
-                return files
-            if path.startswith('compare/'):
-                return {'merge_base_commit': {'sha': BASE}}
-            if path.startswith('git/trees/'):
-                return {'tree': [{'type': 'blob', 'path': name} for name in tree]}
-            if path.startswith('contents/'):
-                name = path[len('contents/'):].split('?ref=')[0]
-                if name not in contents:
-                    raise core.ReviewError('http_404')
-                return {'type': 'file', 'encoding': 'base64', 'size': len(contents[name]),
-                        'content': base64.b64encode(contents[name].encode()).decode()}
-            raise AssertionError(path)
-        value = state.initial(REPO, 7)
-        for index, name in enumerate(prior):
-            value['findings'][f'finding-{index}'] = {'path': name, 'status': 'open'}
-        return context.collect(REPO, 7, snapshot, cfg, value, api=api)
-
-    def test_largest_change_head_text_is_admitted_regardless_of_api_order(self):
-        patch_text = '@@ -1 +1 @@\n-old\n+new'
-        files = [{'filename': 'src/copy.ts', 'status': 'modified', 'additions': 3, 'deletions': 3, 'patch': patch_text},
-                 {'filename': 'src/use-control-state.ts', 'status': 'modified', 'additions': 120, 'deletions': 40, 'patch': patch_text}]
-        contents = {'src/copy.ts': 'c' * 100, 'src/use-control-state.ts': 'u' * 100}
-        cfg = settings()
-        cfg['limits']['context_chars'] = 150
-        for order in (files, files[::-1]):
-            data = self.collect_with(order, contents, cfg, [])
-            # Diffs keep GitHub's order; only source admission is reordered.
-            self.assertEqual([entry['path'] for entry in data['files']], [item['filename'] for item in order])
-            texts = {entry['path']: entry['head_text'] for entry in data['files']}
-            self.assertEqual(texts, {'src/copy.ts': None, 'src/use-control-state.ts': 'u' * 100})
-            self.assertIn({'path': 'src/copy.ts', 'reason': 'head_text_unavailable_or_budget'}, data['omitted'])
-        # Without GitHub's counts, the patch's changed lines decide the order.
+        cfg['limits']['brief_chars'] = 120
+        files = [item('src/small.py', 1, 1, '@@ -1 +1 @@\n-a\n+b'),
+                 item('src/large.py', 50, 10, '@@ -1 +1 @@\n-' + 'x' * 60 + '\n+' + 'y' * 40),
+                 item('src/huge.py', 400, 0, '@@ -0,0 +1 @@\n+' + 'z' * 500),
+                 item('src/binary.png', 0, 0, None), item('../escape.py', 1, 0)]
+        files[3]['patch'] = None
+        brief = self.build(files, cfg)
+        entries = {value['path']: value for value in brief['files']}
+        # The file list keeps GitHub's order; only patch admission follows change size.
+        self.assertEqual([value['path'] for value in brief['files']], ['src/small.py', 'src/large.py', 'src/huge.py', 'src/binary.png'])
+        self.assertEqual(entries['src/huge.py']['patch_omitted'], 'brief_budget')
+        self.assertIsNone(entries['src/huge.py']['patch'])
+        # The larger change wins the remaining budget even though GitHub listed it later.
+        self.assertEqual(entries['src/large.py']['patch'], files[1]['patch'])
+        self.assertEqual((entries['src/small.py']['patch'], entries['src/small.py']['patch_omitted']), (None, 'brief_budget'))
+        cfg['limits']['brief_chars'] = 140
+        # A patch over budget does not stop smaller ones from being admitted.
+        self.assertEqual(self.build(files, cfg)['files'][0]['patch'], files[0]['patch'])
+        self.assertEqual(entries['src/binary.png']['patch_omitted'], 'no_text_patch')
+        self.assertIn({'path': '../escape.py', 'reason': 'unsafe_path'}, brief['omitted'])
+        self.assertEqual(brief['stats'], {'changed_files': 5, 'changed_lines': 463})
+        self.assertEqual(brief['coverage'], 'repository_snapshot_with_read_tools')
         self.assertEqual(context.change_size({'patch': '@@ -1,2 +1,3 @@\n-a\n+b\n+c\n\n same'}), 3)
 
-    def test_explicit_include_precedes_base_text_under_tight_budget(self):
-        files = [{'filename': 'src/a.py', 'status': 'modified', 'patch': '@@ -1 +1 @@\n-old\n+new'}]
-        contents = {'src/a.py': 'x' * 40, 'config/settings.toml': 'y' * 40}
+    def test_description_truncation_and_incomplete_file_list_are_recorded(self):
         cfg = settings()
-        cfg['context'] = {'include': ['config/*.toml']}
-        cfg['limits']['context_chars'] = 100
-        data = self.collect_with(files, contents, cfg, ['src/a.py', 'config/settings.toml'])
-        self.assertEqual(data['files'][0]['head_text'], 'x' * 40)
-        self.assertEqual(data['context'], [{'path': 'config/settings.toml', 'reason': 'configured_context', 'head_text': 'y' * 40}])
-        self.assertIsNone(data['files'][0]['base_text'])
-        self.assertEqual(data['omitted'], [{'path': 'src/a.py', 'reason': 'base_text_unavailable_or_budget'}])
+        cfg['limits']['description_chars'] = 10
+        brief = self.build([item('src/a.py')], cfg, body='claim ' * 5, changed=3)
+        self.assertEqual(brief['description'], 'claim clai')
+        self.assertEqual((brief['description_chars'], brief['description_truncated']), (30, True))
+        self.assertIn({'path': '<description>', 'reason': 'description_budget'}, brief['omitted'])
+        self.assertIn({'path': '<file-list>', 'reason': 'github_file_list_incomplete'}, brief['omitted'])
+        short = self.build([item('src/a.py')], cfg, body='claim')
+        self.assertFalse(short['description_truncated'])
+        self.assertEqual(short['omitted'], [])
 
-    def test_unadmitted_explicit_context_is_reported_with_reason(self):
-        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
-        contents = {'src/a.py': 'x' * 40, 'config/a.toml': 'a' * 40, 'config/big.toml': 'z' * 500,
-                    'config/c.toml': 'c' * 40, 'config/d.toml': 'd' * 40}
+    def test_generation_policy_thresholds_labels_events_and_full_command(self):
+        stats = {'changed_lines': 50, 'changed_files': 2}
+        review = {'command': 'review', 'action': 'synchronize', 'labels': []}
+        cases = [
+            (None, review, (True, None)),
+            ({'min_changed_lines': 50}, review, (True, None)),
+            ({'min_changed_lines': 51}, review, (False, 'below_generation_threshold')),
+            # An absent threshold must not default to zero and always pass.
+            ({'min_changed_files': 3}, review, (False, 'below_generation_threshold')),
+            ({'min_changed_lines': 500, 'min_changed_files': 2}, review, (True, None)),
+            ({'min_changed_lines': 500, 'labels': ['deep-review']}, {**review, 'labels': ['deep-review']}, (True, None)),
+            ({'min_changed_lines': 500, 'events': ['ready_for_review']}, {**review, 'action': 'ready_for_review'}, (True, None)),
+            ({'min_changed_lines': 500}, {**review, 'command': 'full'}, (True, None)),
+            ({'min_changed_lines': 500}, {**review, 'command': 'verify'}, (True, None)),
+            ({'min_changed_lines': 500, 'on_full_review': False}, {**review, 'command': 'full'}, (False, 'below_generation_threshold')),
+            ({'labels': ['deep-review']}, review, (False, 'below_generation_threshold')),
+        ]
+        for policy, trigger, expected in cases:
+            with self.subTest(policy=policy, trigger=trigger):
+                self.assertEqual(context.generation_planned(policy, stats, trigger), expected)
+
+    def test_generation_policy_marks_only_its_lane_skipped(self):
+        cfg = settings(generation={'GPT': {'min_changed_lines': 100}})
+        lanes = self.build([item('src/a.py')], cfg)['lanes']
+        self.assertEqual(lanes['Grok'], {'paths': None, 'reason': 'missing_or_changed_configuration', 'generate': True})
+        self.assertEqual(lanes['GPT'], {'paths': None, 'reason': 'below_generation_threshold', 'generate': False})
+        lanes = self.build([item('src/a.py')], cfg, trigger={**self.trigger, 'command': 'full'}, force_full=True)['lanes']
+        self.assertEqual(lanes['GPT'], {'paths': None, 'reason': 'explicit_full_review', 'generate': True})
+
+    def test_incremental_lane_reasons(self):
         cfg = settings()
-        cfg['context'] = {'include': ['config/*.toml']}
-        cfg['limits'].update(context_chars=200, max_context_files=2)
-        data = self.collect_with(files, contents, cfg, list(contents), prior=['src/old.py'])
-        self.assertEqual([entry['path'] for entry in data['context']], ['config/a.toml', 'config/c.toml'])
-        self.assertEqual(data['omitted'], [{'path': 'src/old.py', 'reason': 'context_unavailable'},
-                                           {'path': 'config/big.toml', 'reason': 'context_budget'},
-                                           {'path': 'config/d.toml', 'reason': 'context_file_limit'}])
+        files = [item('src/a.py'), item('src/b.py')]
+        old = 'd' * 40
+        compare = {'status': 'ahead', 'commits': [{'sha': HEAD}], 'files': [{'filename': 'src/a.py'}]}
+        def prior(**lanes):
+            value = state.initial(REPO, NUMBER)
+            value['lanes'] = {name: {'head_sha': HEAD, 'base_sha': BASE, 'config_id': cfg['config_id'], **change}
+                              for name, change in lanes.items()}
+            return value
+        lanes = self.build(files, cfg, prior(Grok={}, GPT={'head_sha': old}), api=lambda *args: compare)['lanes']
+        self.assertEqual(lanes['Grok'], {'paths': [], 'reason': 'identical_successful_snapshot', 'generate': True})
+        self.assertEqual(lanes['GPT'], {'paths': ['src/a.py'], 'reason': 'incremental', 'generate': True, 'baseline_head': old})
+        outside = {**compare, 'files': [{'filename': 'src/a.py'}, {'filename': 'lib/dependency.py'}]}
+        lanes = self.build(files, cfg, prior(Grok={'head_sha': old}), api=lambda *args: outside)['lanes']
+        self.assertEqual(lanes['Grok'], {'paths': None, 'reason': 'related_context_changed_full_review', 'generate': True})
+        self.assertEqual(lanes['GPT']['reason'], 'missing_or_changed_configuration')
+        cases = [({'base_sha': 'e' * 40}, None, 'base_changed'), ({'config_id': 'old'}, None, 'missing_or_changed_configuration'),
+                 ({'head_sha': old}, {'status': 'diverged'}, 'history_changed_or_compare_incomplete'),
+                 ({'head_sha': old}, core.ReviewError('http_404'), 'comparison_unavailable')]
+        for change, response, reason in cases:
+            def api(*args, response=response):
+                if isinstance(response, Exception):
+                    raise response
+                return response
+            with self.subTest(reason=reason):
+                lanes = self.build(files, cfg, prior(Grok=change), api=api)['lanes']
+                self.assertEqual((lanes['Grok']['paths'], lanes['Grok']['reason']), (None, reason))
+        lanes = self.build(files, cfg, prior(Grok={}), force_full=True)['lanes']
+        self.assertEqual(lanes['Grok']['reason'], 'explicit_full_review')
+        # A lane with nothing new is not marked skipped by its generation policy.
+        cfg_policy = settings(generation={'Grok': {'min_changed_lines': 1000}})
+        value = prior(Grok={})
+        for lane in value['lanes'].values():
+            lane['config_id'] = cfg_policy['config_id']
+        lanes = self.build(files, cfg_policy, value)['lanes']
+        self.assertEqual(lanes['Grok'], {'paths': [], 'reason': 'identical_successful_snapshot', 'generate': True})
 
-    def test_related_omissions_are_bounded_with_one_aggregate_record(self):
-        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
-        siblings = [f'src/m{index:02}.py' for index in range(30)]
-        contents = {name: 'value = 1\n' for name in ['src/a.py'] + siblings}
-        cfg = settings()
-        cfg['context'] = {}
-        cfg['limits']['max_context_files'] = 2
-        data = self.collect_with(files, contents, cfg, list(contents))
-        self.assertEqual([entry['path'] for entry in data['context']], siblings[:2])
-        self.assertEqual(data['omitted'], [{'path': name, 'reason': 'context_file_limit'} for name in siblings[2:22]]
-                         + [{'path': '<related-context>', 'reason': 'related_context_omitted_additional'}])
+    def test_brief_identity_is_deterministic(self):
+        files = [item('src/a.py'), item('src/b.py', 9, 9)]
+        self.assertEqual(self.build(files)['packet_id'], self.build(copy.deepcopy(files))['packet_id'])
 
-    def test_configured_include_omissions_share_the_related_record_bound(self):
-        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
-        missing = [f'config/m{index:02}.toml' for index in range(30)]
-        cfg = settings()
-        cfg['context'] = {'include': ['config/*']}
-        data = self.collect_with(files, {'src/a.py': 'x'}, cfg, missing, prior=['src/old.py'])
-        # Previous-finding misses stay individual; configured includes are capped.
-        self.assertEqual(data['omitted'], [{'path': 'src/old.py', 'reason': 'context_unavailable'}]
-                         + [{'path': name, 'reason': 'context_unavailable'} for name in missing[:context.RELATED_OMISSION_RECORDS]]
-                         + [{'path': '<related-context>', 'reason': 'related_context_omitted_additional'}])
 
-    def test_omission_records_stay_within_the_packet_budget(self):
-        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
-        cfg = settings()
-        cfg['context'] = {'include': ['config/*']}
-        size = len(json.dumps(self.collect_with(files, {}, cfg, [])))
-        cfg['limits']['packet_chars'] = size + 13000
-        # Each unreadable include produces a record of about 540 characters, so the
-        # packet budget binds before the individual-record bound does.
-        missing = [f'config/{"n" * 480}{index:02}.toml' for index in range(40)]
-        data = self.collect_with(files, {}, cfg, missing)
-        recorded = [item for item in data['omitted'] if item['path'] in missing]
-        self.assertTrue(0 < len(recorded) < context.RELATED_OMISSION_RECORDS)
-        # Records also consume packet space, so later includes become budget misses.
-        self.assertEqual({item['reason'] for item in recorded}, {'context_unavailable', 'context_budget'})
-        self.assertEqual(data['omitted'][-1], {'path': '<omitted>', 'reason': 'omission_metadata_exceeds_budget'})
-        self.assertLessEqual(len(json.dumps(data)), cfg['limits']['packet_chars'])
+class CollectionTests(unittest.TestCase):
+    def api(self, current=None, pages=None):
+        calls = []
+        def call(repo, path):
+            calls.append(path)
+            if path == f'pulls/{NUMBER}':
+                return current or pr()
+            if path.startswith(f'pulls/{NUMBER}/files'):
+                page = int(path.rsplit('page=', 1)[1])
+                return (pages or [[item('src/a.py', patch=PATCH)]])[page - 1]
+            if path.startswith('compare/'):
+                return {'merge_base_commit': {'sha': 'c' * 40}}
+            raise AssertionError(path)
+        return call, calls
 
-    def test_large_source_file_is_bounded_by_budget_not_a_fixed_cap(self):
-        files = [{'filename': 'src/a.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+new'}]
-        contents = {'src/a.py': 'x' * 150000}
-        data = self.collect_with(files, contents, settings(), list(contents))
-        self.assertEqual(data['files'][0]['head_text'], 'x' * 150000)
-        oversized = {'type': 'file', 'encoding': 'base64', 'content': base64.b64encode(b'x' * 1000001).decode()}
-        reader = context.Reader(REPO, 10, lambda *args: oversized)
-        # The absolute ceiling applies even when a caller passes a larger budget.
-        with self.assertRaisesRegex(core.ReviewError, 'context_budget'):
-            reader.text('src/a.py', HEAD, max_chars=5000000)
+    def test_collect_pages_files_and_records_the_merge_base(self):
+        pages = [[item(f'src/m{index:03}.py') for index in range(100)], [item('src/last.py')]]
+        api, calls = self.api(pr(changed_files=101), pages)
+        brief = context.collect(REPO, NUMBER, pr(changed_files=101), settings(), state.initial(REPO, NUMBER),
+                                {'command': 'review', 'action': None, 'labels': []}, api=api)
+        self.assertEqual(len(brief['files']), 101)
+        self.assertEqual(brief['merge_base_sha'], 'c' * 40)
+        self.assertEqual(brief['context_reads'], 3)
+        self.assertEqual(len([path for path in calls if 'files?' in path]), 2)
 
     def test_changed_snapshot_is_rejected(self):
-        def api(repo, path):
-            if path == 'pulls/7':
-                value = pr()
-                value['head']['sha'] = 'c' * 40
-                return value
-            return self.api(repo, path)
+        api, _ = self.api(pr(head={'sha': 'c' * 40, 'repo': {'full_name': REPO}}))
         with self.assertRaisesRegex(core.ReviewError, 'changed_during_collection'):
-            context.collect(REPO, 7, pr(), settings(), state.initial(REPO, 7), api=api)
+            context.collect(REPO, NUMBER, pr(), settings(), state.initial(REPO, NUMBER), {'command': 'review', 'labels': []}, api=api)
 
     def test_fork_draft_closed_and_non_default_targets_are_ineligible(self):
         cases = [pr() for _ in range(4)]
@@ -340,16 +367,14 @@ class ContextTests(unittest.TestCase):
         cases[2]['state'] = 'closed'
         cases[3]['base']['ref'] = 'release'
         self.assertTrue(all(not context.eligible(value, REPO, 'main') for value in cases))
+        self.assertTrue(context.eligible(pr(), REPO, 'main'))
 
-    def test_incremental_reuses_exact_success_and_falls_back_on_rebase(self):
-        baseline = {'head_sha': HEAD, 'base_sha': BASE, 'config_id': 'config'}
-        reader = context.Reader(REPO, 10, self.api)
-        self.assertEqual(context.incremental(reader, baseline, pr(), 'config', False)[0], [])
-        self.assertIsNone(context.incremental(reader, baseline, pr(), 'changed-config', False)[0])
-        self.assertIsNone(context.incremental(reader, baseline, pr(), 'config', True)[0])
-        baseline['head_sha'] = 'd' * 40
-        reader = context.Reader(REPO, 10, lambda *args: {'status': 'diverged'})
-        self.assertIsNone(context.incremental(reader, baseline, pr(), 'config', False)[0])
+    def test_reader_bounds_api_reads(self):
+        reader = context.Reader(REPO, 1, lambda *args: {'value': 1})
+        reader.get('a')
+        reader.get('a')
+        with self.assertRaisesRegex(core.ReviewError, 'context_api_budget'):
+            reader.get('b')
 
     def test_repository_metadata_route_has_no_trailing_slash(self):
         with patch.dict(os.environ, {'GH_TOKEN': 'test-token'}), patch.object(core, 'request_json', return_value={}) as request:
@@ -357,14 +382,13 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(request.call_args.args[0], 'https://api.github.com/repos/' + REPO)
 
     def test_action_launcher_cannot_import_consumer_shadow_package(self):
-        root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             shadow = Path(directory) / 'independent_review'
             shadow.mkdir()
             (shadow / '__init__.py').write_text('raise RuntimeError("consumer code executed")')
-            result = subprocess.run([sys.executable, '-I', str(root / 'scripts/action_phase.py'), 'cli', 'validate-config',
-                                     '--root', str(root), '--config', 'examples/review.json', '--out', directory],
-                                    cwd=directory, capture_output=True, text=True, timeout=10)
+            result = subprocess.run([sys.executable, '-I', str(ROOT / 'scripts/action_phase.py'), 'cli', 'validate-config',
+                                     '--root', str(ROOT), '--config', 'examples/review.json', '--out', directory],
+                                    cwd=directory, capture_output=True, text=True, timeout=20, env=clean_env())
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_policy_cannot_escape_trusted_checkout(self):
@@ -378,112 +402,50 @@ class ContextTests(unittest.TestCase):
                 config.trusted_file(root, None)
 
 
-class VerificationTests(unittest.TestCase):
-    def runners(self, status='confirmed', failure=False):
-        calls = []
-        def grok(backend, prompt):
-            calls.append('grok')
-            return answer([candidate()]), 'grok-test', {'total_tokens': 10}
-        def gemini(backend, prompt):
-            if prompt.startswith('Independently challenge'):
-                calls.append('verification')
-                if failure:
-                    raise core.ReviewError('http_503')
-                payload = verification_payload(prompt)
-                decisions = [{'finding_id': item['finding_id'], 'status': status, 'reason': 'The supplied caller passes an empty list without a guard.',
-                              'evidence_path': 'src/a.py', 'evidence': 'return value[0]'} for item in payload['candidates']]
-                return json.dumps({'decisions': decisions}), 'gemini-test', {'total_tokens': 10}
-            calls.append('gemini')
-            return answer(), 'gemini-test', {'total_tokens': 10}
-        return echo_input_end({'compatible_packet': grok, 'antigravity_packet': gemini}), calls
+class CommandTests(unittest.TestCase):
+    def event(self, body, user_type='User'):
+        return {'action': 'created', 'issue': {'number': 7, 'pull_request': {'url': 'PR'}},
+                'comment': {'body': body, 'user': {'login': 'maintainer', 'type': user_type}}}
 
-    def test_single_model_discovery_is_cross_verified_without_consensus_requirement(self):
-        runners, calls = self.runners()
-        result = service.run(bundle(), runners)
-        self.assertEqual(result['status'], 'completed')
-        self.assertEqual(result['findings'][0]['status'], 'open')
-        self.assertEqual(result['findings'][0]['verification']['verifier'], 'Gemini')
-        self.assertEqual(sorted(calls), ['gemini', 'grok', 'verification'])
+    def test_commands_check_current_write_permission_and_reject_shell_suffixes(self):
+        event = self.event('/review full')
+        self.assertEqual(cli.target('issue_comment', event, REPO, 'review', lambda *args: {'permission': 'write'}), (7, 'full'))
+        self.assertIsNone(cli.target('issue_comment', event, REPO, 'review', lambda *args: {'permission': 'read'})[0])
+        event['comment']['body'] = '/review verify 0123abcd'
+        self.assertEqual(cli.target('issue_comment', event, REPO, 'review', lambda *args: {'permission': 'admin'}), (7, 'verify:0123abcd'))
+        for text in ('/review full; curl attacker', '/review\nfull', '/review @someone', '/review full now'):
+            event['comment']['body'] = text
+            self.assertIsNone(cli.target('issue_comment', event, REPO, 'review')[0])
+        event['comment'].update(body='/review', user={'type': 'Bot', 'login': state.BOT})
+        self.assertIsNone(cli.target('issue_comment', event, REPO, 'review')[0])
 
-    def test_counterevidence_withdraws_candidate_without_inline_publication(self):
-        runners, _ = self.runners('dismissed')
-        result = service.run(bundle(), runners)
-        self.assertEqual(result['findings'][0]['status'], 'dismissed')
+    def test_trigger_context_carries_command_action_and_labels(self):
+        event = {'action': 'labeled', 'label': {'name': 'deep-review'},
+                 'pull_request': {'number': 7, 'labels': [{'name': 'api'}, {'name': 'deep-review'}]}}
+        self.assertEqual(cli.trigger_context('pull_request_target', event, 'review'),
+                         {'command': 'review', 'action': 'labeled', 'labels': ['api', 'deep-review']})
+        self.assertEqual(cli.trigger_context('issue_comment', self.event('/review verify abcdef12'), 'verify:abcdef12'),
+                         {'command': 'verify', 'action': None, 'labels': []})
 
-    def test_verifier_operational_failure_does_not_advance_baselines(self):
-        data = bundle()
-        runners, _ = self.runners(failure=True)
-        result = service.run(data, runners)
-        reserved = state.reserve(data['state'], data, '1:1', 'url')
-        accepted = state.accept(reserved, result, '1:1')
-        self.assertEqual(accepted['lanes'], {})
-        self.assertEqual(accepted['status'], 'partial')
-        self.assertEqual(result['findings'][0]['status'], 'uncertain')
-
-    def test_absence_from_incremental_output_does_not_fix_old_issue(self):
-        data = bundle()
-        item = {**candidate(), 'status': 'open', 'sources': ['Grok']}
-        data['state']['findings'][item['finding_id']] = item
-        def run(backend, prompt):
-            if prompt.startswith('Independently challenge'):
-                return json.dumps({'decisions': [{'finding_id': item['finding_id'], 'status': 'uncertain', 'reason': 'Missing callers.'}]}), 'model', {}
-            return answer(), 'model', {}
-        result = service.run(data, echo_input_end({name: run for name in core.HARNESSES}))
-        self.assertEqual(result['findings'][0]['status'], 'uncertain')
-
-    def test_identical_lanes_are_reused_without_any_model_call(self):
-        data = bundle()
-        for name in ('Grok', 'Gemini'):
-            data['packet']['lanes'][name]['paths'] = []
-            data['state']['lanes'][name] = {'review': {'slot': name, 'findings': [], 'summary': 'Cached'}}
-        def unexpected(*args):
-            self.fail('Unexpected provider invocation')
-        result = service.run(data, {name: unexpected for name in core.HARNESSES})
-        self.assertEqual([item['status'] for item in result['reviews']], ['reused', 'reused'])
-        self.assertEqual(result['accounted_tokens'], 0)
-
-    def test_requested_finding_is_not_starved_by_the_verification_cap(self):
-        data = bundle()
-        data['config']['limits']['max_verification_candidates'] = 1
-        first, requested = 'a' * 24, 'z' * 24
-        for fid in (first, requested):
-            data['state']['findings'][fid] = {**candidate(), 'finding_id': fid, 'status': 'open', 'sources': ['Grok']}
-        data['verify_finding'] = requested
-        seen = []
-        def runner(backend, prompt):
-            if prompt.startswith('Independently challenge'):
-                payload = verification_payload(prompt)
-                seen.extend(item['finding_id'] for item in payload['candidates'])
-                return json.dumps({'decisions': [{'finding_id': item['finding_id'], 'status': 'uncertain', 'reason': 'Missing callers.'}
-                                                for item in payload['candidates']]}), 'model', {}
-            return answer(), 'model', {}
-        service.run(data, echo_input_end({name: runner for name in core.HARNESSES}))
-        self.assertEqual(seen, [requested])
-
-    def test_fixed_requires_current_head_evidence_not_missing_old_text(self):
-        item = {**candidate(), 'previous': True}
-        decision = {'finding_id': item['finding_id'], 'status': 'fixed', 'reason': 'Changed.', 'evidence_path': 'src/a.py', 'evidence': 'return None'}
-        with self.assertRaisesRegex(core.ReviewError, 'evidence_not_in_packet'):
-            service.parse_decisions(json.dumps({'decisions': [decision]}), packet(), [item])
+    def test_identical_successful_snapshot_skips_collection_and_reservation(self):
+        cfg = settings()
+        prior = state.initial(REPO, 7)
+        prior['lanes'] = {slot['id']: {'head_sha': HEAD, 'base_sha': BASE, 'config_id': cfg['config_id']}
+                          for slot in cfg['backends']['slots']}
+        with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'workflow_dispatch', 'REVIEW_PUBLISH': 'false'}), \
+             patch.object(cli, 'metadata', return_value=(REPO, {'inputs': {'pr_number': '7'}}, 'main')), \
+             patch.object(cli.configuration, 'load', return_value=cfg), \
+             patch.object(cli.state, 'read', return_value=(prior, 1)), \
+             patch.object(cli, 'github', return_value=pr()), \
+             patch.object(cli, 'run_identity', return_value=('1:1', 'url')), \
+             patch.object(cli, 'collect') as collect, patch.object(cli.state, 'reserve') as reserve, \
+             contextlib.redirect_stdout(io.StringIO()):
+            cli.prepare(SimpleNamespace(root='.', config='unused', mode='review', out='unused'))
+            collect.assert_not_called()
+            reserve.assert_not_called()
 
 
-class ContextWindowTests(unittest.TestCase):
-    def test_context_projection_is_per_lane_and_preserves_whole_patches(self):
-        data = packet()
-        data['context'] = [{'path': 'large_related.py', 'head_text': 'x' * 1600000}]
-        grok = {'harness': 'compatible_packet', 'default_context_window_tokens': 500000, 'default_effort': 'xhigh'}
-        # The HTTP Gemini harness has no native input step cap.
-        gemini = {'harness': 'gemini_packet', 'default_context_window_tokens': 1048576, 'default_effort': 'medium'}
-        small, small_meta = service.fit_packet(data, grok)
-        large, large_meta = service.fit_packet(data, gemini)
-        self.assertEqual(small['context'], [])
-        self.assertEqual(len(large['context']), 1)
-        self.assertEqual(small['files'][0]['patch'], data['files'][0]['patch'])
-        self.assertEqual(len(data['context']), 1)
-        self.assertTrue(small_meta['omitted'])
-        self.assertFalse(large_meta['omitted'])
-        self.assertLessEqual(large_meta['estimated_prompt_tokens'], large_meta['input_budget_tokens'])
-
+class RuntimeSettingsTests(unittest.TestCase):
     def test_native_step_cap_clamps_only_the_agy_input_budget(self):
         release = json.loads(Path(core.__file__).with_name('agy-release.json').read_text())
         cap = release['native_input']['max_user_input_step_tokens'] - core.NATIVE_WRAPPER_RESERVE_TOKENS
@@ -492,16 +454,13 @@ class ContextWindowTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             large = core.runtime_settings(native)
             small = core.runtime_settings({**native, 'default_context_window_tokens': 65536})
-            grok = core.runtime_settings({'harness': 'compatible_packet', 'default_context_window_tokens': 500000,
+            grok = core.runtime_settings({'harness': 'responses_tools', 'default_context_window_tokens': 500000,
                                           'default_effort': 'xhigh', 'output_reserve_tokens': 128000})
-            gateway = core.runtime_settings({**native, 'harness': 'gemini_packet'})
         self.assertEqual((large['input_budget_tokens'], large['native_step_cap_tokens'], large['context_window_tokens']),
                          (60000, 60000, 1048576))
         self.assertEqual((small['input_budget_tokens'], small['native_step_cap_tokens']), (65536 - 16000, 60000))
         self.assertEqual(grok['input_budget_tokens'], 500000 - 128000)
-        self.assertEqual(gateway['input_budget_tokens'], 1048576 - 104857)
         self.assertNotIn('native_step_cap_tokens', grok)
-        self.assertNotIn('native_step_cap_tokens', gateway)
         with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(core.ReviewError, 'prompt_exceeds_configured_context_budget'):
             core.check_context(native, 'x' * (60000 * 3 + 1))
         for value in ({'max_user_input_step_tokens': 64000, 'bytes_per_token': 4}, {'max_user_input_step_tokens': '64000', 'bytes_per_token': 3}, {}):
@@ -509,208 +468,21 @@ class ContextWindowTests(unittest.TestCase):
                 with self.assertRaisesRegex(core.ReviewError, 'invalid_native_input_cap'):
                     core.runtime_settings(native)
 
-    def test_native_verification_prompt_is_projected_below_the_agy_step_cap(self):
-        data = packet()
-        data['context'] = [{'path': f'src/related_{index}.py', 'head_text': 'x' * 60000} for index in range(4)]
-        self.assertGreater(len(service.verification_prompt(data, [candidate()], core.input_nonce()).encode()), 192000)
-        native = {'harness': 'antigravity_packet', 'default_context_window_tokens': 1048576, 'default_effort': 'medium'}
-        grok = {'harness': 'compatible_packet', 'default_context_window_tokens': 500000, 'default_effort': 'xhigh'}
-        with patch.dict(os.environ, {}, clear=True):
-            projected, meta = service.fit_packet(data, native, [candidate()])
-            _, grok_meta = service.fit_packet(data, grok, [candidate()])
-        prompt = service.verification_prompt(projected, [candidate()], core.input_nonce())
-        self.assertLess(len(prompt.encode()), 192000)
-        self.assertLessEqual(core.estimate_tokens(prompt), meta['native_step_cap_tokens'])
-        self.assertEqual((meta['input_budget_tokens'], meta['context_window_tokens']), (60000, 1048576))
-        self.assertTrue(meta['omitted'])
-        self.assertEqual({item['reason'] for item in meta['omitted']}, {'lane_context_budget'})
-        self.assertEqual(projected['omitted'], meta['omitted'])
-        self.assertEqual(projected['files'][0]['patch'], data['files'][0]['patch'])
-        self.assertEqual(grok_meta['omitted'], [])
-
-    def test_report_states_a_binding_native_cap_without_changing_the_model_window(self):
-        data = bundle()
-        data['packet']['context'] = [{'path': f'src/related_{index}.py', 'head_text': 'x' * 60000} for index in range(4)]
-        with patch.dict(os.environ, {}, clear=True):
-            result = service.run(data, echo_input_end({name: lambda *args: (answer(), 'model', {'total_tokens': 10})
-                                                       for name in core.HARNESSES}))
-        lanes = {lane['slot']: lane for lane in result['reviews']}
-        self.assertEqual(lanes['Gemini']['native_step_cap_tokens'], 60000)
-        self.assertEqual(lanes['Gemini']['context_window_tokens'], 1048576)
-        self.assertTrue(lanes['Gemini']['input_context']['omitted'])
-        self.assertNotIn('native_step_cap_tokens', lanes['Grok'])
-        self.assertFalse(lanes['Grok']['input_context']['omitted'])
-        rendered = delivery.report(result)
-        self.assertIn('Native agy input step cap: input limited to 60,000 estimated tokens; the configured model window remains 1,048,576.', rendered)
-        self.assertEqual(rendered.count('Native agy input step cap'), 1)
-
-    def test_native_lane_that_drops_a_changed_diff_stays_partial(self):
-        data = bundle()
-        data['packet']['files'].append({'path': 'src/big.py', 'status': 'added', 'patch': '@@ -0,0 +1 @@\n+' + 'x' * 200000,
-                                        'head_text': None, 'base_text': None})
-        with patch.dict(os.environ, {}, clear=True):
-            result = service.run(data, echo_input_end({name: lambda *args: (answer(), 'model', {'total_tokens': 10})
-                                                       for name in core.HARNESSES}))
-        lanes = {lane['slot']: lane for lane in result['reviews']}
-        self.assertIn({'path': 'src/big.py', 'reason': 'diff_lane_budget'}, lanes['Gemini']['input_context']['omitted'])
-        self.assertEqual((lanes['Gemini']['status'], lanes['Gemini']['error']), ('partial', 'lane_diff_omitted'))
-        self.assertEqual((lanes['Grok']['status'], result['status']), ('completed', 'partial'))
-        reserved = state.reserve(data['state'], data, '1:1', 'url')
-        accepted = state.accept(reserved, result, '1:1')
-        # Only the lane that received every changed diff advances its baseline.
-        self.assertEqual(set(accepted['lanes']), {'Grok'})
-        gemini = next(lane for lane in accepted['last_reviews'] if lane['slot'] == 'Gemini')
-        self.assertEqual(gemini['errors'], ['lane_diff_omitted'])
-        self.assertEqual(gemini['failure_notes'], [core.failure_description({'error': 'lane_diff_omitted'})])
-        self.assertTrue(gemini['failure_notes'][0])
-
-    def test_lane_input_projection_error_fails_only_that_lane(self):
-        data = bundle()
-        # Required packet metadata alone exceeds the native agy step but fits Grok.
-        data['packet']['description'] = 'x' * 300000
-        def grok(backend, prompt):
-            return answer([candidate()]), 'grok-test', {'total_tokens': 10}
-        def gemini(backend, prompt):
-            raise AssertionError('An input that cannot be projected must not be sent')
-        with patch.dict(os.environ, {}, clear=True):
-            result = service.run(data, echo_input_end({'compatible_packet': grok, 'antigravity_packet': gemini}))
-        lanes = {lane['slot']: lane for lane in result['reviews']}
-        code = 'required_evidence_exceeds_lane_context'
-        self.assertEqual(result['status'], 'partial')
-        self.assertEqual((lanes['Gemini']['status'], lanes['Gemini']['error']), ('failed', code))
-        self.assertEqual(lanes['Gemini']['attempts'], [{'status': 'failed', 'error': code, 'stage': 'input'}])
-        self.assertEqual([finding['path'] for finding in lanes['Grok']['findings']], ['src/a.py'])
-        # The verification projection fails the same way; the candidate stays uncertain.
-        self.assertEqual([(item['slot'], item['status'], item['error']) for item in result['verifications']],
-                         [('Gemini', 'failed', code)])
-        self.assertEqual(result['findings'][0]['status'], 'uncertain')
-
-    def test_required_verification_evidence_is_not_silently_removed(self):
-        data = packet()
-        data['files'][0]['patch'] = '@@ -0,0 +1 @@\n+' + 'x' * 2000000
-        with self.assertRaisesRegex(core.ReviewError, 'required_evidence_exceeds'):
-            service.fit_packet(data, {'harness': 'compatible_packet', 'default_context_window_tokens': 500000}, [candidate()])
-
-    def test_oversized_candidate_head_text_is_dropped_before_failing(self):
-        data = packet()
-        data['files'][0]['head_text'] += 'x' * 200000
-        native = {'harness': 'antigravity_packet', 'default_context_window_tokens': 1048576, 'default_effort': 'medium'}
-        with patch.dict(os.environ, {}, clear=True):
-            projected, meta = service.fit_packet(data, native, [candidate()])
-        # The patch still carries the candidate's evidence; only the current text goes.
-        self.assertEqual(projected['files'][0]['patch'], data['files'][0]['patch'])
-        self.assertIsNone(projected['files'][0]['head_text'])
-        self.assertIn({'path': 'src/a.py', 'reason': 'head_text_lane_budget'}, meta['omitted'])
-        self.assertLessEqual(meta['estimated_prompt_tokens'], meta['input_budget_tokens'])
-
-    def test_known_model_limits_and_native_effort_mismatch_fail_closed(self):
-        backend = {'model_env': 'MODEL', 'effort_env': 'EFFORT', 'context_window_env': 'WINDOW', 'harness': 'compatible_packet'}
-        with patch.dict(os.environ, {'MODEL': 'grok-4.6', 'EFFORT': 'xhigh', 'WINDOW': '1048576'}):
+    def test_known_model_limits_and_effort_names_fail_closed(self):
+        backend = {'model_env': 'MODEL', 'effort_env': 'EFFORT', 'context_window_env': 'WINDOW', 'harness': 'responses_tools'}
+        with patch.dict(os.environ, {'MODEL': 'grok-4.7', 'EFFORT': 'xhigh', 'WINDOW': '1048576'}):
             with self.assertRaisesRegex(core.ReviewError, 'exceeds_model_capacity'):
                 core.runtime_settings(backend)
+        with patch.dict(os.environ, {'MODEL': 'grok-4.7', 'EFFORT': 'ultra', 'WINDOW': '500000'}):
+            with self.assertRaisesRegex(core.ReviewError, 'unsupported_reasoning_effort'):
+                core.runtime_settings(backend)
+        codex = {**backend, 'harness': 'codex_cli', 'verify_effort_env': 'VERIFY'}
+        with patch.dict(os.environ, {'MODEL': 'gpt-6.1-sol', 'EFFORT': 'ultra', 'VERIFY': 'xhigh', 'WINDOW': '1050000'}):
+            value = core.runtime_settings(codex)
+        self.assertEqual((value['effort'], value['verify_effort']), ('ultra', 'xhigh'))
         with patch.dict(os.environ, {'MODEL': 'gemini-3.8-flash-high', 'EFFORT': 'medium', 'WINDOW': '1048576'}):
             with self.assertRaisesRegex(core.ReviewError, 'native_model_effort_mismatch'):
                 core.runtime_settings({**backend, 'harness': 'antigravity_packet'})
-
-    def test_large_context_reservation_fits_the_updated_pr_budget(self):
-        data = bundle()
-        data['packet']['description'] = 'x' * 3000000
-        data['config']['runtime'] = {'Grok': {'input_budget_tokens': 450000}, 'Gemini': {'input_budget_tokens': 943719}}
-        reserved = state.reserve(data['state'], data, '1:1', 'url')
-        self.assertGreater(reserved['tokens'], 2000000)
-        self.assertLess(reserved['tokens'], data['config']['limits']['max_tokens_per_pr'])
-
-    def test_explicit_effort_reaches_each_http_protocol(self):
-        backends = settings()['backends']['backends']
-        environment = {'GROK_MODEL': 'grok-4.6', 'GROK_BASE_URL': 'https://gateway.example/v1', 'GROK_API_KEY': 'fixture',
-                       'GROK_EFFORT': 'xhigh', 'GROK_CONTEXT_WINDOW': '500000', 'GEMINI_MODEL': 'gemini-3.8-flash',
-                       'GEMINI_BASE_URL': 'https://gateway.example/v1beta', 'GEMINI_API_KEY': 'fixture',
-                       'GEMINI_EFFORT': 'medium', 'GEMINI_CONTEXT_WINDOW': '1048576'}
-        def response(url, token, payload, **kwargs):
-            if 'chat/completions' in url:
-                self.assertEqual(payload['reasoning_effort'], 'xhigh')
-                self.assertNotIn('context_window', payload)
-                return {'choices': [{'finish_reason': 'stop', 'message': {'content': answer()}}]}
-            self.assertEqual(payload['generationConfig']['thinkingConfig']['thinkingLevel'], 'MEDIUM')
-            return {'candidates': [{'finishReason': 'STOP', 'content': {'parts': [{'text': answer()}]}}]}
-        def stream(url, token, payload, backend):
-            self.assertTrue(payload['stream'])
-            self.assertTrue(payload['stream_options']['include_usage'])
-            return response(url, token, payload)['choices'][0]['message']['content'], 'grok-4.6', {}
-        with patch.dict(os.environ, environment, clear=True), patch.object(core, 'request_json', side_effect=response), patch('independent_review.transport.completion', side_effect=stream):
-            core.run_compatible({**backends['grok-gateway'], 'api': 'chat_completions'}, 'small packet')
-            core.run_gemini(backends['gemini-gateway'], 'small packet')
-
-
-class CommandAndDeliveryTests(unittest.TestCase):
-    def event(self, body, user_type='User'):
-        return {'action': 'created', 'issue': {'number': 7, 'pull_request': {}},
-                'comment': {'body': body, 'user': {'login': 'maintainer', 'type': user_type}}}
-
-    def test_commands_check_current_write_permission_and_reject_shell_suffixes(self):
-        event = self.event('/review full')
-        event['issue']['pull_request'] = {'url': 'PR'}
-        self.assertEqual(cli.target('issue_comment', event, REPO, 'review', lambda *args: {'permission': 'write'}), (7, 'full'))
-        self.assertIsNone(cli.target('issue_comment', event, REPO, 'review', lambda *args: {'permission': 'read'})[0])
-        for text in ('/review full; curl attacker', '/review\nfull', '/review @someone', '/review full now'):
-            event['comment']['body'] = text
-            self.assertIsNone(cli.target('issue_comment', event, REPO, 'review')[0])
-        event['comment'].update(body='/review', user={'type': 'Bot', 'login': state.BOT})
-        self.assertIsNone(cli.target('issue_comment', event, REPO, 'review')[0])
-
-    def test_stale_sha_prevents_any_comment_write(self):
-        value = {**state.initial(REPO, 7), 'head_sha': 'c' * 40, 'base_sha': BASE}
-        with self.assertRaisesRegex(core.ReviewError, 'changed_before_publication'):
-            delivery.current_pr(value, 'main', lambda *args: pr())
-
-    def test_only_verified_anchored_findings_post_comment_event(self):
-        value = {**state.initial(REPO, 7), 'head_sha': HEAD, 'base_sha': BASE}
-        item = {**candidate(), 'status': 'open', 'verification': {'reason': 'Confirmed by the supplied caller.'}}
-        value['findings'] = {item['finding_id']: item, 'uncertain': {**item, 'finding_id': 'uncertain', 'status': 'uncertain'}}
-        writes = []
-        def api(repo, path, data=None, method=None):
-            if path == 'pulls/7':
-                return pr()
-            if method == 'POST':
-                writes.append(data)
-                return {'id': 15}
-            if '/reviews/15/comments' in path:
-                return [{'id': 22, 'user': {'login': state.BOT}, 'body': writes[0]['comments'][0]['body']}]
-            return []
-        delivery.publish_inline(value, settings(), 'main', api)
-        self.assertEqual(len(writes), 1)
-        self.assertEqual(writes[0]['event'], 'COMMENT')
-        self.assertEqual(writes[0]['commit_id'], HEAD)
-        self.assertEqual(len(writes[0]['comments']), 1)
-        self.assertEqual(item['comment_id'], 22)
-        delivery.publish_inline(value, settings(), 'main', api)
-        self.assertEqual(len(writes), 1)
-
-    def test_own_orphaned_post_is_recovered_without_reposting(self):
-        item = {**candidate(), 'status': 'open'}
-        value = {**state.initial(REPO, 7), 'head_sha': HEAD, 'base_sha': BASE, 'findings': {item['finding_id']: item}}
-        def api(repo, path, data=None, method=None):
-            self.assertIsNone(method)
-            return [{'id': 31, 'user': {'login': state.BOT}, 'body': f"<!-- independent-pr-review-finding:{item['finding_id']} -->"}]
-        delivery.publish_inline(value, settings(), 'main', api)
-        self.assertEqual(item['comment_id'], 31)
-
-    def test_only_owned_verified_fixed_threads_are_resolved(self):
-        item = {**candidate(), 'status': 'fixed', 'comment_id': 9000000031}
-        value = {**state.initial(REPO, 7), 'head_sha': HEAD, 'base_sha': BASE, 'findings': {item['finding_id']: item}}
-        mutations = []
-        def gql(query, variables):
-            self.assertNotIn('databaseId', query)
-            if query.startswith('mutation'):
-                mutations.append(variables['id'])
-                return {}
-            return {'repository': {'pullRequest': {'reviewThreads': {'pageInfo': {'hasNextPage': False}, 'nodes': [
-                {'id': 'own', 'isResolved': False, 'comments': {'nodes': [{'fullDatabaseId': '9000000031', 'author': {'login': 'github-actions', '__typename': 'Bot'}}]}},
-                {'id': 'human', 'isResolved': False, 'comments': {'nodes': [{'fullDatabaseId': '32', 'author': None}]}}
-            ]}}}}
-        delivery.resolve_fixed(value, 'main', lambda *args: pr(), gql)
-        self.assertEqual(mutations, ['own'])
-        self.assertTrue(item['thread_resolved'])
 
 
 if __name__ == '__main__':
