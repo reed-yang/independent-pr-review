@@ -200,8 +200,6 @@ def failure_description(attempt):
     diagnostics = attempt.get('diagnostics') or {}
     if error in ('input_end_nonce_missing', 'input_end_nonce_mismatch'):
         return 'The reviewer did not confirm the end of its input, which may have been truncated; its output is not a complete review.'
-    if error == 'lane_diff_omitted':
-        return 'Some changed-file diffs did not fit the input limit of this reviewer and were not sent to it; its output is not a complete review.'
     if error == 'provider_stream_error':
         reason = diagnostics.get('incomplete_reason')
         if reason in ('max_output_tokens', 'max_prompt_tokens', 'max_time_limit'):

@@ -182,7 +182,9 @@ called again (`verification_skipped_after_provider_failure`).
 A generated finding needs a changed-file path, severity P1 or P2, ordered trigger
 steps, mechanism, consequence, and evidence: an exact quote of at least 8
 characters from that file at the head or merge base, its patch, or one contiguous
-side of a diff hunk, without fuzzy whitespace matching. A lane returns at most five
+side of a diff hunk. Only the whitespace at the start and end of each quoted line may
+differ: the first line must end a source line, the last must start one, and lines
+between must equal whole source lines. A lane returns at most five
 findings. Invalid candidates are recorded with bounded, redacted quote diagnostics
 and excluded; valid siblings are kept, and the lane stays partial. Verifiers decide
 confirmed, dismissed, fixed or uncertain. Every decision except uncertain cites an
