@@ -142,7 +142,7 @@ def prepare(args):
     packet = None if same_snapshot else collect(repo, number, pr, config, prior, trigger, force_full=force_full)
     # Nothing to generate (unchanged, or skipped by policy) means nothing new to verify.
     if same_snapshot or all(lane['paths'] == [] or not lane['generate'] for lane in packet['lanes'].values()):
-        prior = state.reuse(prior, run_url)
+        prior = state.reuse(prior, run_url, packet and packet['lanes'])
         if publish:
             delivery.publish_inline(prior, config, default_branch)
             delivery.write_summary(prior, comment_id, key, config['limits'])
@@ -247,7 +247,7 @@ def verify(args):
 
 def missing_lane(slot):
     return {'slot': slot['id'], 'opinion_family': slot['opinion_family'], 'status': 'failed',
-            'error': 'lane_result_missing', 'findings': [],
+            'error': 'lane_result_missing', 'scope': 'lane_result_missing', 'findings': [],
             'attempts': [{'status': 'failed', 'error': 'lane_result_missing', 'stage': 'job'}]}
 
 

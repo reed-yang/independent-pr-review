@@ -335,6 +335,8 @@ def combine(bundle, reviews, verifications, workspace):
     return {'schema_version': 3, 'repository': brief['repository'], 'pr_number': brief['pr_number'],
             'base_sha': brief['base_sha'], 'merge_base_sha': brief['merge_base_sha'], 'head_sha': brief['head_sha'],
             'packet_id': brief['packet_id'], 'config_id': config['config_id'], 'bundle_id': digest(bundle),
+            'engine_version': config.get('engine_version'), 'description_truncated': bool(brief.get('description_truncated')),
+            'description_chars': brief.get('description_chars'),
             'status': 'completed' if complete else 'partial', 'coverage': brief['coverage'],
             'omitted': brief['omitted'], 'stats': brief.get('stats', {}), 'reviews': reviews,
             'verifications': verifications, 'findings': findings, 'accounted_tokens': accounted}
