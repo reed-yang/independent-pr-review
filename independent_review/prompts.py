@@ -70,11 +70,15 @@ def brief_json(brief):
     return json.dumps({key: brief.get(key) for key in keys}, ensure_ascii=False)
 
 
+# context.build falls back to a full review when an incremental scope is longer.
+MAX_SCOPE_PATHS = 200
+
+
 def scope_text(lane):
     paths = lane.get('paths')
     if not paths:
         return 'Scope: review the whole PR.'
-    shown = json.dumps(paths[:200], ensure_ascii=False)
+    shown = json.dumps(paths[:MAX_SCOPE_PATHS], ensure_ascii=False)
     return (f"Scope: the PR changed since your previous successful review at {lane.get('baseline_head')}. "
             f"Focus on these paths {shown}, but follow their callers, callees and tests anywhere in the "
             'repository; an unchanged PR file can break because of them.')

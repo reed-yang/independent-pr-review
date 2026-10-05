@@ -41,6 +41,9 @@ hold only that lane's provider key. See
 
 ## Connect a repository
 
+Upgrading from v0.3: follow [these steps](docs/operations.md#upgrading-from-v03);
+changing only the workflow pin stops every review.
+
 1. Copy [examples/auto-review.yml](examples/auto-review.yml) to
    `.github/workflows/auto-review.yml`, replacing `RELEASE_COMMIT_SHA` with a reviewed
    immutable release SHA. The [release notes](https://github.com/reed-yang/independent-pr-review/releases)
@@ -95,7 +98,8 @@ holds: the run comes from `/review full`, `/review verify <id>` or a `full` disp
 `events`; the PR has a listed label; or the whole PR reaches a configured threshold
 (added plus deleted lines, or changed files). Otherwise the lane is reported as
 skipped with `below_generation_threshold`, still verifies the other lane's
-candidates, and keeps its previous baseline. Add `labeled` to the caller's
+candidates, and keeps its previous baseline. If every lane with changes is skipped,
+the summary says `skipped_by_policy` instead of presenting a clean review. Add `labeled` to the caller's
 `pull_request_target` types if adding a label should start a run.
 
 [Architecture and trust boundaries](docs/architecture.md) ·

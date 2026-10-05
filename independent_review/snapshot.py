@@ -228,20 +228,22 @@ class Snapshot:
                 matches.append((path, int(line), text))
         return matches
 
-    def diff(self, path=None, context=3):
-        """Unified merge-base...head diff, optionally for one path."""
+    def diff(self, path=None, context=3, previous=None):
+        """Unified merge-base...head diff, optionally for one path (and its pre-rename path)."""
         args = ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '-M', f'-U{int(context)}',
                 self.shas['base'], self.shas['head']]
         if path:
-            if not safe_path(path):
+            # A pathspec of only the new name hides a rename and shows the file as added.
+            paths = [previous, path] if previous else [path]
+            if not all(safe_path(value) for value in paths):
                 raise ReviewError('invalid_snapshot_path')
-            args += ['--', path]
+            args += ['--', *paths]
         return checked(self.git(args), 'snapshot_diff_failed').decode('utf-8', 'replace')
 
     def evidence_entry(self, path, patch=None, previous_filename=None):
         """Assemble the sources a quote may come from for one path."""
         if patch is None:
-            body = self.diff(path)
+            body = self.diff(path, previous=previous_filename)
             patch = body[body.find('\n@@') + 1:] if '\n@@' in body else ''
         return {'path': path, 'patch': patch,
                 'head_text': self.read_text('head', path),

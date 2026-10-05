@@ -2,6 +2,7 @@
 
 from .config import selected_rules
 from .core import ReviewError, digest, github, safe_path
+from .prompts import MAX_SCOPE_PATHS
 
 
 def identity(pr):
@@ -125,6 +126,8 @@ def build(repo, number, pr, items, merge_base, config, state, trigger, force_ful
         if lane_paths and any(path not in paths for path in lane_paths):
             # A dependency-only update can affect an unchanged PR hunk.
             lane_paths, reason = None, 'related_context_changed_full_review'
+        elif lane_paths and len(lane_paths) > MAX_SCOPE_PATHS:
+            lane_paths, reason = None, 'incremental_scope_too_large'
         lane = {'paths': lane_paths, 'reason': reason, 'generate': True}
         if lane_paths:
             lane['baseline_head'] = baseline['head_sha']

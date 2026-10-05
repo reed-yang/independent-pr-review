@@ -119,7 +119,10 @@ through the same proxy and count toward the lane's limits and usage.
 
 A consumer can select another backends file through `backends` in `review.json`.
 It must define two slots with distinct opinion families and one backend each, using
-the `responses_tools` or `codex_cli` harness; disabled backends are rejected.
+the `responses_tools` or `codex_cli` harness; disabled backends are rejected. The
+reusable workflow passes Variables and keys only to slots named `Grok` and `GPT`,
+under the `GROK_*` and `GPT_*` names, and installs Codex only for `GPT`, so a custom
+file must keep those slot ids and environment names.
 
 ## GPT lane key isolation
 
@@ -206,7 +209,9 @@ line that the reply must copy into `input_end_nonce`. A missing or different val
 (`input_end_nonce_missing`, `input_end_nonce_mismatch`) keeps evidence-checked
 results but marks that lane or batch partial, so it cannot advance a baseline.
 
-Only unique added/deleted diff-line matches become inline anchors. Finding identity
+Only unique added/deleted diff-line matches become inline anchors. A file for which
+GitHub supplied no text patch never gets one; a renamed file's fallback diff pairs it
+with its previous path. Finding identity
 uses normalized evidence, path and nearby scope, with rename carryover. This is
 stable under wording changes, not a universal semantic identity: substantial code
 rewrites can produce a new ID. Every normalized opinion, trace and verification
@@ -239,8 +244,12 @@ with the current head: files changed since then become the lane's focus, and the
 prompt asks it to follow callers, callees and tests anywhere in the repository.
 Changes outside the PR's files, force pushes, rebases, a changed base or
 configuration, missing history and incomplete comparisons fall back to a full
-review. A run in which no lane has new work to generate, because the snapshot is
-unchanged or generation policies skip it, makes no reservation or model call. Each
+review, as does an incremental scope of more than 200 files
+(`incremental_scope_too_large`). A run in which no lane has new work to generate makes
+no reservation or model call. If a lane already reviewed this head, the previous
+result is reused; if instead generation policies skipped every lane that has changes,
+the summary reports `skipped_by_policy` with the last reviewed outcomes and posts no
+inline comments. A verification job that leaves no result keeps its reservation. Each
 lane advances its baseline only when its generation and every verification batch
 completed. Prior unresolved findings are reverified when a new run occurs; silence
 never means fixed.

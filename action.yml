@@ -29,6 +29,9 @@ outputs:
   pr_number:
     description: Validated PR number
     value: ${{ steps.phase.outputs.pr_number }}
+  lanes:
+    description: JSON list of lane ids for the generate and verify matrices
+    value: ${{ steps.phase.outputs.lanes }}
   status:
     description: Normalized review status
     value: ${{ steps.phase.outputs.status }}

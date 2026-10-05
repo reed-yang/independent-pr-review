@@ -317,6 +317,10 @@ class BriefTests(unittest.TestCase):
                 self.assertEqual((lanes['Grok']['paths'], lanes['Grok']['reason']), (None, reason))
         lanes = self.build(files, cfg, prior(Grok={}), force_full=True)['lanes']
         self.assertEqual(lanes['Grok']['reason'], 'explicit_full_review')
+        many = [item(f'src/m{index}.py') for index in range(201)]
+        wide = {**compare, 'files': [{'filename': entry['filename']} for entry in many]}
+        lanes = self.build(many, cfg, prior(Grok={'head_sha': old}), api=lambda *args: wide)['lanes']
+        self.assertEqual((lanes['Grok']['paths'], lanes['Grok']['reason']), (None, 'incremental_scope_too_large'))
         # A lane with nothing new is not marked skipped by its generation policy.
         cfg_policy = settings(generation={'Grok': {'min_changed_lines': 1000}})
         value = prior(Grok={})

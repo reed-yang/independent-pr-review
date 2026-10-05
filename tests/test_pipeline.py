@@ -181,6 +181,16 @@ class VerificationTests(SnapshotCase):
         self.assertEqual(accepted['lanes'], {})
         self.assertIn('Do not interpret this status as a clean review', delivery.summary(accepted, data['config']['limits']))
 
+    def test_missing_verification_result_keeps_its_reservation(self):
+        data = self.bundle()
+        runner = Scripted(findings={'grok': [finding()]})
+        reviews = [service.generate(data, slot, self.workspace, runner.runners()) for slot in ('Grok', 'GPT')]
+        result = service.combine(data, reviews, [], self.workspace)
+        (missing,) = result['verifications']
+        reserved = data['config']['backends']['backends']['gpt-codex']['verification_reservation_tokens']
+        self.assertEqual((missing['error'], missing['accounted_tokens']), ('verification_result_missing', reserved))
+        self.assertEqual((result['status'], result['findings'][0]['status']), ('partial', 'uncertain'))
+
     def test_rejected_verification_quote_keeps_valid_sibling_and_stays_partial(self):
         findings = [finding(), finding(evidence='return head', title='Second')]
         def decide(candidate, family):
@@ -382,6 +392,26 @@ class PhaseTests(SnapshotCase):
         self.assertIn('head = value［0］', (self.out / 'result.md').read_text())
         self.assertNotIn('gh-token-fixture-value-0001', (self.out / 'result.json').read_text())
 
+    def test_policy_skip_at_a_new_head_is_not_a_completed_review(self):
+        real = cli.collect
+        def skipped(*args, **kwargs):
+            packet = real(*args, **kwargs)
+            for lane in packet['lanes'].values():
+                lane.update(paths=None, reason='below_generation_threshold', generate=False)
+            return packet
+        with patch.object(cli, 'collect', skipped):
+            self.phase('prepare', publishing=True)
+        self.assertIn('reason=skipped_by_policy', self.outputs.read_text())
+        self.assertNotIn('run=true', self.outputs.read_text())
+        body = self.github.summary()
+        value = state.decode(body, KEY, REPO, NUMBER)
+        self.assertEqual((value['status'], value['runs'], value['reservation']), ('skipped_by_policy', 0, None))
+        self.assertEqual([(lane['slot'], lane['status']) for lane in value['last_reviews']], [('Grok', 'skipped'), ('GPT', 'skipped')])
+        self.assertIn('No reviewer ran for the current head', body)
+        self.assertNotIn('No verified actionable findings', body)
+        self.assertEqual(result_block(body)['status'], 'skipped_by_policy')
+        self.assertFalse([path for method, path, data in self.github.writes if path == f'pulls/{NUMBER}/reviews'])
+
     def test_inference_phases_refuse_publishing_credentials_before_hardening(self):
         self.phase('prepare', publishing=True)
         for name in ('GH_TOKEN', 'REVIEW_STATE_KEY'):
@@ -408,6 +438,31 @@ class PhaseTests(SnapshotCase):
         self.assertEqual(accepted['status'], 'partial')
         # Grok's generation and the verification of its candidates completed; only it advances.
         self.assertEqual(set(accepted['lanes']), {'Grok'})
+
+
+class RenameTests(SnapshotCase):
+    MODULE = 'from .helpers import thing\n\n\ndef run():\n    return thing()\n'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temporary.name)
+        cls.repo = Repository(cls.root, base_files={'pkg/a/mod.py': cls.MODULE, 'pkg/a/helpers.py': 'thing = 1\n'},
+                              head_files={'pkg/a/mod.py': None, 'pkg/b/mod.py': cls.MODULE})
+        cls.out = cls.root / 'out'
+        cls.base_bundle = make_bundle(cls.repo, cls.out)
+        cls.workspace = snapshot.Snapshot.open(cls.out, cls.base_bundle['snapshot'], cls.root / 'work')
+
+    def test_pure_rename_gets_a_rename_diff_and_no_inline_anchor(self):
+        (entry,) = self.base_bundle['packet']['files']
+        self.assertEqual((entry['path'], entry['status'], entry['patch_omitted']), ('pkg/b/mod.py', 'renamed', 'no_text_patch'))
+        patch = self.workspace.evidence_entry('pkg/b/mod.py', None, 'pkg/a/mod.py')['patch']
+        self.assertFalse([line for line in patch.splitlines() if line.startswith('+')])
+        quote = finding(path='pkg/b/mod.py', line=1, evidence='from .helpers import thing',
+                        trigger_steps=['Import pkg.b.mod.', 'The relative import looks for pkg/b/helpers.py.'])
+        review = service.generate(self.bundle(), 'Grok', self.workspace, Scripted(findings={'grok': [quote]}).runners())
+        (item,) = review['findings']
+        self.assertEqual((review['status'], item['anchor'], item['line']), ('completed', None, None))
 
 
 class ReplayTests(unittest.TestCase):

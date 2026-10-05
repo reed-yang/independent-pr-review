@@ -178,6 +178,20 @@ def accept(state, result, run_id):
     return value
 
 
+def skip_by_policy(state, run_url, lanes):
+    """Record a new head that no lane reviewed because every lane with changes is below its policy."""
+    value = reuse(state, run_url, lanes)
+    value['status'] = 'skipped_by_policy'
+    shown = {lane.get('slot') for lane in value['last_reviews']}
+    for slot, plan in lanes.items():
+        if slot not in shown:
+            value['last_reviews'].append({
+                'slot': slot, 'status': 'skipped', 'scope': plan.get('reason'),
+                'access': {'files_examined': 0, 'tool_calls': 0, 'files_read': 0}, 'limitations': [],
+                'observations': [], 'errors': [], 'failure_notes': [], 'rejected_count': 0})
+    return value
+
+
 def reuse(state, run_url, lanes=None):
     """Mark an unchanged run; a lane its generation policy skipped is shown as skipped."""
     value = copy.deepcopy(state)

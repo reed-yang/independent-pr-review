@@ -25,6 +25,8 @@ def changed_lines(patch):
 
 
 def locate(entry, evidence, requested_line=None):
+    if entry.get('anchorable') is False:
+        return None
     pieces = [line.strip() for line in evidence.splitlines() if len(line.strip()) >= 8]
     matches = [line for line in changed_lines(entry['patch'])
                if any(piece in line['text'] or piece.lstrip('+-') == line['text'].strip() for piece in pieces)]

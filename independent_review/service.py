@@ -82,6 +82,8 @@ class Sources:
             entry = self.workspace.evidence_entry(path, changed.get('patch'), changed.get('previous_filename'))
             if changed.get('previous_filename'):
                 entry['previous_filename'] = changed['previous_filename']
+            # GitHub has no diff lines to comment on when it supplied no text patch.
+            entry['anchorable'] = changed.get('patch_omitted') != 'no_text_patch'
             self.cache[path] = entry
         return self.cache[path]
 
@@ -319,8 +321,10 @@ def combine(bundle, reviews, verifications, workspace):
     by_slot = {item['slot']: item for item in verifications}
     for slot in slots:
         if batches[slot['id']] and slot['id'] not in by_slot:
+            # The job may have spent its budget before it was lost; keep the reservation.
+            reserved = lane_backend(config, slot['id'])[2].get('verification_reservation_tokens', 0)
             by_slot[slot['id']] = {'slot': slot['id'], 'status': 'failed', 'error': 'verification_result_missing',
-                                   'decisions': {}, 'accounted_tokens': 0}
+                                   'decisions': {}, 'accounted_tokens': reserved}
     verifications = [by_slot[slot['id']] for slot in slots if slot['id'] in by_slot]
     decisions = {fid: {**decision, 'verifier': result['slot']} for result in verifications
                  for fid, decision in result['decisions'].items()}

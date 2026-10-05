@@ -58,6 +58,7 @@ commands and per-lane usage.
 | `unsupported_reasoning_effort`, `configured_context_exceeds_model_capacity`, `invalid_context_window` | Use an effort the harness accepts (`low` to `xhigh` for Grok; `low` to `max` or `ultra` for Codex) and no more than the model's window; see [model capability evidence](design.md#model-capability-evidence). |
 | `review_backend_disabled`, `unsupported_harness` | A custom backends file selects the retired agy backend or a non-tool harness. See [the retired agy lane](authentication.md#retired-agy-lane). |
 | Run or token budget exhausted | A trusted maintainer can review usage and raise the default-branch config cap in a reviewed change. Commands cannot raise it. |
+| `skipped_by_policy` | Every lane with changes is below its generation policy, so no reviewer ran for the current head. Use `/review full` or a configured label to review it. |
 | Stale head/base at publication | Review the current snapshot; old results cannot be attached to the new SHA. |
 | Inline publication failed | Retry `/review`. Successful cached evidence can recover an already posted comment by its owned marker. |
 | Publication warning about verified-fixed threads | GitHub refused to resolve an owned thread; the summary names the error type and a later run retries. Check that the caller still grants `pull-requests: write`. |
@@ -90,6 +91,24 @@ when generation is skipped by policy or the verification batch is empty.
 `result.md` reports each lane's input, cached input, output, reasoning and total
 tokens and request count. Each stateless Grok turn resends the earlier turns, so its
 input tokens grow with the number of turns.
+
+## Upgrading from v0.3
+
+Updating only the workflow pin is not enough:
+
+1. In `review.json`, remove `context` and the `packet_chars`, `context_chars` and
+   `max_context_files` limits (they fail with `invalid_review_limits`); use
+   `brief_chars` and `description_chars` if the defaults do not fit.
+2. Raise `max_tokens_per_pr` to at least 17,000,000 or remove it for the 60,000,000
+   default. One two-lane run reserves 17M (Grok 4M + 2M, GPT 8M + 3M); the v0.3
+   example's 8M makes every run stop with `review_token_budget_exhausted`.
+3. Add the `GPT_API_KEY` Secret to the Environment and to the caller's `secrets:`
+   mapping, and set `GPT_BASE_URL` and `GPT_MODEL` (optionally `GPT_EFFORT`,
+   `GPT_VERIFY_EFFORT`). `AGY_OAUTH_JSON`, `GEMINI_API_KEY` and the `AGY_*`/`GEMINI_*`
+   Variables are no longer used.
+4. Optionally add a `generation` policy for GPT and the `labeled` event.
+5. Run `validate-config` with the new pin before merging, then `/review full` on an
+   eligible PR.
 
 ## Releasing
 

@@ -142,12 +142,21 @@ def prepare(args):
     packet = None if same_snapshot else collect(repo, number, pr, config, prior, trigger, force_full=force_full)
     # Nothing to generate (unchanged, or skipped by policy) means nothing new to verify.
     if same_snapshot or all(lane['paths'] == [] or not lane['generate'] for lane in packet['lanes'].values()):
-        prior = state.reuse(prior, run_url, packet and packet['lanes'])
+        # A lane with no paths already reviewed this head; otherwise policy skipped every changed lane.
+        if same_snapshot or any(lane['paths'] == [] for lane in packet['lanes'].values()):
+            prior = state.reuse(prior, run_url, packet and packet['lanes'])
+            if publish:
+                delivery.publish_inline(prior, config, default_branch)
+                delivery.write_summary(prior, comment_id, key, config['limits'])
+            print('Identical successful snapshot reused; no provider calls or run reservation.')
+            output(reason='reused')
+            return
+        # Stored anchors belong to the last reviewed head, so nothing is published inline.
+        prior = state.skip_by_policy(prior, run_url, packet['lanes'])
         if publish:
-            delivery.publish_inline(prior, config, default_branch)
             delivery.write_summary(prior, comment_id, key, config['limits'])
-        print('Identical successful snapshot reused; no provider calls or run reservation.')
-        output(reason='reused')
+        print('Every lane with changes is below its generation policy; no provider calls or run reservation.')
+        output(reason='skipped_by_policy')
         return
     if not packet['files']:
         prior['status'] = 'no_reviewable_text'

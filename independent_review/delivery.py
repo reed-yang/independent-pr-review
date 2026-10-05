@@ -19,6 +19,7 @@ SCOPES = {'missing_or_changed_configuration': 'Full review: new policy or first 
           'explicit_full_review': 'Full review requested', 'incremental': 'Changes since previous successful review',
           'identical_successful_snapshot': 'Same base, head and configuration', 'base_changed': 'Full review: base changed',
           'related_context_changed_full_review': 'Full review: files outside the PR diff changed since the previous review',
+          'incremental_scope_too_large': 'Full review: more files changed since the previous review than one scope lists',
           'history_changed_or_compare_incomplete': 'Full review: history changed or comparison incomplete',
           'comparison_unavailable': 'Full review: previous comparison unavailable',
           'no_reviewable_changed_text': 'No reviewable text changes',
@@ -104,6 +105,9 @@ def render(state, limits, detail):
     more(lines, groups['open'], detail['open'], 'verified open findings are listed in the workflow report.')
     if not groups['open'] and state['status'] == 'completed':
         lines.append('No verified actionable findings in the reviewed scope. This is not an approval or a full-repository audit.')
+    elif state['status'] == 'skipped_by_policy':
+        lines.append('No reviewer ran for the current head: every lane with changes is below its generation '
+                     'policy. Outcomes below are from the last reviewed head; use `/review full` to review this head.')
     elif state['status'] == 'ineligible':
         lines.append('This PR is no longer eligible for automatic review. Previous review outcomes are retained below.')
     elif state['status'] not in ('completed', 'ready'):
