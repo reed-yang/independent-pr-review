@@ -158,13 +158,21 @@ class VerificationTests(SnapshotCase):
         self.assertIn("Skipped: below the generation threshold for this lane; it still verifies the other lane's candidates",
                       html.unescape(text))
 
-    def test_verification_is_skipped_after_a_provider_failure(self):
-        failure = core.ReviewError('provider_idle_timeout', {'stage': 'read'})
+    def test_transient_generation_failure_still_verifies_the_other_lane(self):
+        failure = core.ReviewError('http_502', {'stage': 'headers'})
+        runner = Scripted(findings={'grok': [finding()]}, fail={('gpt', 'review'): failure})
+        reviews, verifications, result = self.run_all(self.bundle(), runner)
+        self.assertEqual(runner.calls, [('grok', 'review'), ('gpt', 'review'), ('gpt', 'verify')])
+        self.assertEqual((reviews[1]['status'], verifications[1]['status']), ('failed', 'completed'))
+        self.assertEqual((result['status'], result['findings'][0]['status']), ('partial', 'open'))
+
+    def test_verification_is_skipped_after_a_persistent_provider_failure(self):
+        failure = core.ReviewError('http_401', {'stage': 'headers'})
         runner = Scripted(findings={'grok': [finding()]}, fail={('gpt', 'review'): failure})
         reviews, verifications, result = self.run_all(self.bundle(), runner)
         self.assertEqual(runner.calls, [('grok', 'review'), ('gpt', 'review')])
         self.assertEqual((reviews[1]['status'], reviews[1]['attempts'][0]['stage']), ('failed', 'provider'))
-        self.assertEqual(reviews[1]['attempts'][0]['diagnostics'], {'stage': 'read'})
+        self.assertEqual(reviews[1]['attempts'][0]['diagnostics'], {'stage': 'headers'})
         self.assertEqual(verifications[1]['error'], 'verification_skipped_after_provider_failure')
         self.assertEqual((result['status'], result['findings'][0]['status']), ('partial', 'uncertain'))
         self.assertEqual((reviews[0]['status'], reviews[0]['error']), ('partial', 'verification_incomplete'))

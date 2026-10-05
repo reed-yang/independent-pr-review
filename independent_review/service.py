@@ -179,6 +179,15 @@ def generate(bundle, slot_id, workspace, runners=None):
                               'elapsed_seconds': elapsed, 'diagnostics': exc.diagnostics}]}
 
 
+# Generation failures that a verification call in the same run would repeat. Transient
+# provider errors and timeouts still allow the lane to verify the other family's candidates.
+PERSISTENT_ERRORS = frozenset({
+    'backend_not_configured', 'https_endpoint_required', 'invalid_context_window', 'invalid_tool_budget',
+    'unsupported_reasoning_effort', 'http_400', 'http_401', 'http_403', 'http_404', 'provider_dns_error',
+    'provider_tls_error', 'codex_not_found', 'codex_version_unknown', 'codex_version_mismatch',
+    'invalid_codex_model', 'invalid_proxy_url', 'invalid_proxy_limits', 'credential_in_output'})
+
+
 def plan(bundle, reviews, sources):
     """Deterministically select candidates and assign each to the other family."""
     brief, config, prior = bundle['packet'], bundle['config'], bundle['state']
@@ -275,7 +284,8 @@ def verify(bundle, slot_id, reviews, workspace, runners=None):
         return {'slot': slot_id, 'status': 'not_needed', 'decisions': {}, 'accounted_tokens': 0}
     _, backend_id, backend = lane_backend(config, slot_id)
     generation = next((review for review in reviews if review['slot'] == slot_id), {})
-    if generation.get('status') == 'failed' and any(attempt.get('stage') == 'provider' for attempt in generation.get('attempts', [])):
+    if generation.get('status') == 'failed' and any(attempt.get('stage') == 'provider' and attempt.get('error') in PERSISTENT_ERRORS
+                                                    for attempt in generation.get('attempts', [])):
         return {'slot': slot_id, 'status': 'failed', 'error': 'verification_skipped_after_provider_failure',
                 'decisions': {}, 'accounted_tokens': 0, 'elapsed_seconds': 0}
     settings = runtime_settings(backend)

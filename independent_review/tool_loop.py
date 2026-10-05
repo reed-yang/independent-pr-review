@@ -58,6 +58,11 @@ ARGUMENT_ERRORS = {'invalid_grep_pattern': 'invalid or unsupported extended regu
                    'snapshot_git_timeout': 'the operation took too long; narrow it'}
 USAGE_KEYS = ('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_tokens', 'total_tokens')
 MIN_ROOM_CHARS = 500
+# Each turn resends the whole conversation, so a turn that failed in transit can be sent again.
+TRANSIENT_ERRORS = frozenset({'http_429', 'http_500', 'http_502', 'http_503', 'http_504', 'provider_connection_error',
+                              'provider_connect_timeout', 'provider_request_timeout', 'provider_headers_timeout',
+                              'provider_idle_timeout', 'provider_stream_incomplete'})
+RETRY_DELAYS = (10, 30)
 MAX_LINE_CHARS = 1000
 TOOL_SCHEMA_TOKENS = 1500
 FINISH = ('The tool budget of this task is exhausted ({}). Tools are no longer available. Return the final JSON '
@@ -242,7 +247,8 @@ class ToolLoop:
         if self.projected >= self.context_limit:
             raise ReviewError('prompt_exceeds_configured_context_budget')
         self.counters = {'turns': 0, 'tool_calls': 0, 'refused_tool_calls': 0, 'tool_errors': 0,
-                         'truncated_outputs': 0, 'tool_output_chars': 0, 'interrupted_turns': 0}
+                         'truncated_outputs': 0, 'tool_output_chars': 0, 'interrupted_turns': 0,
+                         'turn_retries': 0, 'retried_requests': 0}
         self.usage = {**dict.fromkeys(USAGE_KEYS, 0), 'requests': 0}
         self.metrics = {'transport': 'stream_tool_loop', 'api': 'responses'}
         self.files, self.commands, self.stopped = [], [], None
@@ -342,7 +348,10 @@ class ToolLoop:
                     self.counters['interrupted_turns'] += 1
                     self.finish('timeout')
                     continue
+                if self.retry(str(exc), final):
+                    continue
                 raise ReviewError(str(exc), {**exc.diagnostics, **self.diagnostics()}) from None
+            self.counters['turn_retries'] = 0
             self.record(usage)
             calls = [item for item in output if item.get('type') == 'function_call']
             text = ''.join(part['text'] for item in output if item.get('type') == 'message'
@@ -363,6 +372,20 @@ class ToolLoop:
                 result = self.call(item)
                 self.projected += estimate_tokens(result) + 10
                 self.items.append({'type': 'function_call_output', 'call_id': item['call_id'], 'output': result})
+
+    def retry(self, error, final):
+        """Wait and resend the same turn after a transient failure while time remains."""
+        attempt = self.counters['turn_retries']
+        if error not in TRANSIENT_ERRORS or attempt >= len(RETRY_DELAYS):
+            return False
+        delay = RETRY_DELAYS[attempt]
+        if self.deadline - time.monotonic() <= delay + (0 if final else self.reserve) + 60:
+            return False
+        self.counters['turn_retries'] += 1
+        self.counters['retried_requests'] += 1
+        self.counters['turns'] -= 1
+        time.sleep(delay)
+        return True
 
     def trace(self):
         return {'tool_calls': self.counters['tool_calls'], 'files_read': list(self.files),

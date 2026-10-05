@@ -336,15 +336,31 @@ class LoopTests(SnapshotFixture):
             self.assertEqual(provider.requests[1]['timeout'], 30)
 
     def test_provider_failures_keep_transport_diagnostics_and_loop_counters(self):
-        failure = core.ReviewError('provider_idle_timeout', {'stage': 'read', 'events': 4})
+        failure = core.ReviewError('provider_stream_error', {'stage': 'read', 'events': 4})
         with self.assertRaises(core.ReviewError) as caught:
             self.run_loop([[call_item('c1', 'diff', path='')], failure])
         error = caught.exception
-        self.assertEqual(str(error), 'provider_idle_timeout')
+        self.assertEqual(str(error), 'provider_stream_error')
         self.assertEqual((error.diagnostics['stage'], error.diagnostics['events'], error.diagnostics['turns'],
                           error.diagnostics['tool_calls']), ('read', 4, 2, 1))
         with self.assertRaisesRegex(core.ReviewError, 'empty_model_output'):
             self.run_loop([[REASONING, message('  ')]])
+
+    def test_transient_failures_resend_the_same_turn_a_bounded_number_of_times(self):
+        turn = [call_item('c1', 'diff', path='')]
+        bad_gateway = core.ReviewError('http_502', {'stage': 'headers'})
+        with patch('time.sleep') as sleep:
+            (text, _, usage, trace), provider = self.run_loop(
+                [turn, bad_gateway, core.ReviewError('provider_connection_error'), [message('{"ok":1}')]])
+        self.assertEqual((text, usage['requests'], trace['turns'], trace['retried_requests']), ('{"ok":1}', 4, 2, 2))
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [10, 30])
+        self.assertEqual(provider.requests[1]['payload']['input'], provider.requests[3]['payload']['input'])
+        with patch('time.sleep'), self.assertRaises(core.ReviewError) as caught:
+            self.run_loop([bad_gateway, bad_gateway, bad_gateway, [message('{"ok":1}')]])
+        self.assertEqual((str(caught.exception), caught.exception.diagnostics['retried_requests']), ('http_502', 2))
+        with patch('time.sleep') as sleep, self.assertRaisesRegex(core.ReviewError, 'http_401'):
+            self.run_loop([core.ReviewError('http_401'), [message('{"ok":1}')]])
+        sleep.assert_not_called()
 
     def test_configuration_and_task_are_checked_before_any_request(self):
         provider = FakeProvider([])

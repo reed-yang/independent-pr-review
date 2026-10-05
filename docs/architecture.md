@@ -176,8 +176,12 @@ previously dismissed findings whose file changed since a lane's baseline. Up to
 `/review verify` target first, then previous findings; overflow leaves the run
 partial. Each candidate goes to the first lane that did not report it, and one
 reported by both lanes goes to the last lane (GPT). A lane skipped by its generation
-policy still verifies. A lane whose generation failed at the provider stage is not
-called again (`verification_skipped_after_provider_failure`).
+policy still verifies. A lane whose generation failed with a configuration or
+authorization error (for example a missing key or HTTP 401) is not called again
+(`verification_skipped_after_provider_failure`); after a transient provider error it
+still verifies. The Grok tool loop resends a turn that failed with HTTP 429/5xx, a
+connection error or an interrupted stream up to twice, after 10 and 30 seconds;
+Codex retries upstream errors itself.
 
 A generated finding needs a changed-file path, severity P1 or P2, ordered trigger
 steps, mechanism, consequence, and evidence: an exact quote of at least 8
