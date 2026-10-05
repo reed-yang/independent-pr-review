@@ -38,5 +38,4 @@ jobs:
     secrets:
       REVIEW_STATE_KEY: ${{ secrets.REVIEW_STATE_KEY }}
       GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
-      AGY_OAUTH_JSON: ${{ secrets.AGY_OAUTH_JSON }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GPT_API_KEY: ${{ secrets.GPT_API_KEY }}

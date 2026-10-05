@@ -2,10 +2,6 @@
   "version": 1,
   "rules": ["examples/rules.md"],
   "policies": [],
-  "context": {
-    "include": ["pyproject.toml", "package.json"],
-    "source_roots": []
-  },
   "limits": {
     "max_runs_per_pr": 8,
     "max_tokens_per_pr": 60000000,
