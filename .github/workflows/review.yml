@@ -51,7 +51,7 @@ jobs:
           persist-credentials: false
       - name: Collect trusted policy, brief and snapshot; reserve review
         id: prepare
-        uses: reed-yang/independent-pr-review@6309f1c0ebe3d169c7226a1970e942a1798d1e20 # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@4a62c9c9703fb107c1017a421c93f02636af0b66 # engine pin; updated by scripts/pin_release.py
         with:
           phase: prepare
           config: ${{ inputs.config }}
@@ -99,7 +99,7 @@ jobs:
           name: review-input-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/independent-review
       - name: Independent opinion
-        uses: reed-yang/independent-pr-review@6309f1c0ebe3d169c7226a1970e942a1798d1e20 # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@4a62c9c9703fb107c1017a421c93f02636af0b66 # engine pin; updated by scripts/pin_release.py
         with:
           phase: generate
           lane: ${{ matrix.lane }}
@@ -146,7 +146,7 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/independent-review
       - name: Cross-family candidate verification
-        uses: reed-yang/independent-pr-review@6309f1c0ebe3d169c7226a1970e942a1798d1e20 # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@4a62c9c9703fb107c1017a421c93f02636af0b66 # engine pin; updated by scripts/pin_release.py
         with:
           phase: verify
           lane: ${{ matrix.lane }}
@@ -191,7 +191,7 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/independent-review
       - name: Combine opinions, update summary and verified inline findings
-        uses: reed-yang/independent-pr-review@6309f1c0ebe3d169c7226a1970e942a1798d1e20 # engine pin; updated by scripts/pin_release.py
+        uses: reed-yang/independent-pr-review@4a62c9c9703fb107c1017a421c93f02636af0b66 # engine pin; updated by scripts/pin_release.py
         with:
           phase: publish
           output: ${{ runner.temp }}/independent-review
