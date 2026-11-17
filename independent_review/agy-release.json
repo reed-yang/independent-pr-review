@@ -1,18 +1,18 @@
 {
-  "version": "1.2.14",
+  "version": "1.5.10",
   "platforms": {
     "linux_amd64": {
-      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.14-4571742832820224/linux-x64/cli_linux_x64.tar.gz",
-      "sha512": "fd771dfc74ddd07b61c8b0a6fd7a238f53a3a098a51052583a01d97ab84ee60db741ce5f041e87a9da3c1a9aabe95b053113374437df1e231773552781edaf09"
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.10-5253791805734912/linux-x64/cli_linux_x64.tar.gz",
+      "sha512": "713ae840845d74736e2d4a96f5d84e3353d614e73a875793ddf500997ccee09595448cebfd8e94fdd90ce2a0fa97707bd1cc29763dcfe01c945d80c92234378f"
     },
     "darwin_arm64": {
-      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.14-4571742832820224/darwin-arm/cli_mac_arm64.tar.gz",
-      "sha512": "953afacb5f7cdebe68f02efa6c7322450fb3ecf0cf4bcc65747d3af15e8973ba58df22c41e8151c72c6e82d26a8c3c3ca4d696ec314feb39ad83be34f548a854"
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.10-5253791805734912/darwin-arm/cli_mac_arm64.tar.gz",
+      "sha512": "f192adfc6ca61bc8f0be93b8503c1a0a4e0314f127c9a13fb7e25228343dfbba09ae1a1be083851d9e79a703e535cc19242db44675e40cf7f9a4eaa8cb9b272f"
     }
   },
   "native_input": {
     "max_user_input_step_tokens": 64000,
     "bytes_per_token": 3,
-    "basis": "Static check: agy 1.2.14's default cascade config sets MaxTokensPerUserInputStep to 64000 (0xfa00)."
+    "basis": "Static check: agy 1.5.10's default cascade config sets MaxTokensPerUserInputStep to 64000 (0xfa00)."
   }
 }
